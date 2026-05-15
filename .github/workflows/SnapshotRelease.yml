@@ -1,0 +1,137 @@
+#
+# Snapshot release pipeline.
+#
+# On every push to main that passes the LocalTesting workflow, publish a
+# prerelease GitHub Release tagged snapshot-<sha7>-build<run_number> with
+# the per-platform .duckdb_extension binaries attached.
+#
+# Idempotent on the git SHA: if any release tagged snapshot-<sha7>-build*
+# already exists, the build and publish jobs are skipped.
+#
+# This runs alongside MainDistributionPipeline.yml (which uploads versioned
+# binaries to the duckdb-extensions-nightly S3 bucket); neither replaces
+# the other.
+#
+name: Snapshot Release
+on:
+  workflow_run:
+    workflows: ["Local functional tests"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+  # TEMP smoke-test trigger; remove before merging this PR.
+  push:
+    branches:
+      - ci/snapshot-release-workflow
+
+concurrency:
+  group: snapshot-release-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  check-snapshot:
+    name: Check whether a snapshot for this SHA already exists
+    # workflow_run fires on completion regardless of outcome; only proceed on success.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          TAG="snapshot-${SHORT_SHA}-build${{ github.run_number }}"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}"             >> "$GITHUB_OUTPUT"
+
+          # Match any prior build number for this SHA -- one release per commit.
+          if gh release list --limit 200 --json tagName --jq '.[].tagName' \
+               | grep -q "^snapshot-${SHORT_SHA}-build"; then
+            echo "Snapshot release for ${SHORT_SHA} already exists; skipping."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No snapshot release for ${SHORT_SHA} yet; will build ${TAG}."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build extension binaries
+    needs: check-snapshot
+    if: needs.check-snapshot.outputs.exists != 'true'
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.0
+    secrets: inherit
+    with:
+      extension_name: delta
+      duckdb_version: v1.5.2
+      ci_tools_version: v1.5-variegata
+      enable_rust: true
+      rust_logs: true
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
+      extra_toolchains: ';downgraded_aws_cli;python3;'
+      save_cache: false
+      vcpkg_binary_sources: ${{ vars.VCPKG_BINARY_SOURCES }}
+      reduced_ci_mode: 'disabled'
+
+  release:
+    name: Publish snapshot GitHub Release
+    needs: [check-snapshot, build]
+    if: needs.check-snapshot.outputs.exists != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: delta-v1.5.2-extension-*
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for dir in artifacts/delta-v1.5.2-extension-*; do
+            arch="${dir#artifacts/delta-v1.5.2-extension-}"
+            src="${dir}/delta.duckdb_extension"
+            if [[ ! -f "$src" ]]; then
+              echo "Missing binary for ${arch}: $src" >&2
+              exit 1
+            fi
+            cp "$src" "release/delta-${arch}.duckdb_extension"
+          done
+          ls -la release/
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          COMMIT_SUBJECT=$(git log -1 --pretty=%s)
+          cat > notes.md <<EOF
+          Snapshot build of the \`delta\` DuckDB extension.
+
+          - Commit: \`${GITHUB_SHA}\` (${COMMIT_SUBJECT})
+          - DuckDB version: v1.5.2
+          - Build #: ${{ github.run_number }}
+
+          Binaries are pre-release snapshots and may be removed without notice.
+          EOF
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ needs.check-snapshot.outputs.tag }}" \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "${{ needs.check-snapshot.outputs.tag }}" \
+            --notes-file notes.md \
+            release/*.duckdb_extension
