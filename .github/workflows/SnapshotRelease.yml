@@ -35,7 +35,9 @@ jobs:
   check-snapshot:
     name: Check whether a snapshot for this SHA already exists
     # workflow_run fires on completion regardless of outcome; only proceed on success.
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    # NOTE: `github.event_name == 'push'` allows the temporary smoke-test push trigger;
+    # remove that clause when removing the smoke-test push trigger below.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       exists: ${{ steps.check.outputs.exists }}
