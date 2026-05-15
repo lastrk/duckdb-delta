@@ -23,7 +23,7 @@ jobs:
       ci_tools_version: &ci_tools_ref v1.5-variegata
       enable_rust: true
       rust_logs: true
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
 
       # Config to write vcpkg binary cache
       extra_toolchains: ${{ github.event_name != 'pull_request' && ';downgraded_aws_cli;python3;' || 'python3' }}
@@ -41,7 +41,7 @@ jobs:
       extension_name: *ext_name
       duckdb_version: *duckdb_ref
       ci_tools_version: *ci_tools_ref
-      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;windows_amd64;windows_amd64_rtools;windows_amd64_mingw;linux_amd64_musl'
       # deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       reduced_ci_mode: ${{ github.event_name == 'pull_request' && 'enabled' || 'disabled'}}
