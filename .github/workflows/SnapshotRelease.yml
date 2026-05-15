@@ -19,10 +19,6 @@ on:
     branches: [main]
     types: [completed]
   workflow_dispatch:
-  # TEMP smoke-test trigger; remove before merging this PR.
-  push:
-    branches:
-      - ci/snapshot-release-workflow
 
 concurrency:
   group: snapshot-release-${{ github.sha }}
@@ -35,9 +31,7 @@ jobs:
   check-snapshot:
     name: Check whether a snapshot for this SHA already exists
     # workflow_run fires on completion regardless of outcome; only proceed on success.
-    # NOTE: `github.event_name == 'push'` allows the temporary smoke-test push trigger;
-    # remove that clause when removing the smoke-test push trigger below.
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       exists: ${{ steps.check.outputs.exists }}
