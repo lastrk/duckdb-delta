@@ -49,6 +49,10 @@ public:
 	// Store the log_tail for catalog-managed commits (CCV2)
 	Value catalog_log_tail;
 
+	//! When true, CTAS is allowed to create a new Delta table at this catalog path.
+	//! When false (the default), the path must already contain a valid Delta table on ATTACH.
+	bool allow_create = false;
+
 public:
 	string GetInternalTableName() {
 		return internal_table_name;

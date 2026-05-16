@@ -1,0 +1,48 @@
+# name: test/sql/main/writing/ctas/basic_ctas.test
+# description: Basic CREATE TABLE AS SELECT into a new Delta table
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# -----------------------------------------------------------------------------
+# Setup: create a source table to select from
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE src AS SELECT 1 AS id, 'alice' AS name UNION ALL SELECT 2, 'bob' UNION ALL SELECT 3, 'carol';
+
+# -----------------------------------------------------------------------------
+# Test: basic CTAS into a fresh Delta path
+# The catalog alias is 't'; the table inside the catalog is also 't'.
+# To target the attached catalog explicitly, use <catalog>.<table> syntax.
+# -----------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas/basic' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t AS SELECT id, name FROM src;
+
+query II rowsort
+SELECT id, name FROM t;
+----
+1	alice
+2	bob
+3	carol
+
+statement ok
+DETACH t;
+
+# Verify row count persists after re-attach
+statement ok
+ATTACH '__TEST_DIR__/ctas/basic' AS t2 (TYPE delta);
+
+query I
+SELECT count(*) FROM t2;
+----
+3
+
+statement ok
+DETACH t2;

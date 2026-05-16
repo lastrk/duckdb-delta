@@ -21,6 +21,7 @@
 #include "storage/delta_table_entry.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/value.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 
 namespace duckdb {
@@ -93,11 +94,18 @@ private:
 	DataChunk buffer;
 };
 
+struct StatNode;
+using StatNodeMap = unordered_map<string, StatNode>;
+
 struct StatNode {
 	// If leaf node contains value
 	DeltaColumnStats stats;
 	LogicalType type;
-	unordered_map<string, StatNode> children;
+	//! Children are heap-allocated to allow the self-referential map in C++11.
+	unique_ptr<StatNodeMap> children;
+
+	StatNode() : children(make_uniq<StatNodeMap>()) {
+	}
 };
 
 static LogicalType ParseInnerType(const LogicalType &root_type, const vector<string> &name, idx_t offset) {
@@ -118,8 +126,7 @@ static LogicalType ParseInnerType(const LogicalType &root_type, const vector<str
 }
 
 // Converts the stats from a.b.c -> colstat to a nested StatNode tree
-static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumnStats &stats,
-                           unordered_map<string, StatNode> &output) {
+static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumnStats &stats, StatNodeMap &output) {
 	if (name.size() <= offset) {
 		throw InternalException("Invalid stats name: empty");
 	}
@@ -131,7 +138,7 @@ static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumn
 		if (is_leaf) {
 			throw InternalException("Invalid stats name: duplicate leaf '%s'", name[offset]);
 		}
-		return ParseStatsType(name, offset + 1, stats, output[name[offset]].children);
+		return ParseStatsType(name, offset + 1, stats, *output[name[offset]].children);
 	}
 
 	output[name[offset]] = StatNode();
@@ -143,14 +150,14 @@ static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumn
 		return;
 	}
 
-	return ParseStatsType(name, offset + 1, stats, output[name[offset]].children);
+	return ParseStatsType(name, offset + 1, stats, *output[name[offset]].children);
 }
 
-static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, StatNode> &tree, const string &field) {
+static Value CreateValueLogicalTypeFromStatNode(const StatNodeMap &tree, const string &field) {
 	child_list_t<Value> children;
 
 	for (const auto &node : tree) {
-		if (node.second.children.size() == 0) {
+		if (node.second.children->size() == 0) {
 			if (field == "min") {
 				children.push_back({node.first, node.second.stats.has_min
 				                                    ? Value(node.second.stats.min).DefaultCastAs(node.second.type)
@@ -167,7 +174,7 @@ static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, Stat
 				throw InternalException("Invalid field: %s", field.c_str());
 			}
 		} else {
-			children.push_back({node.first, CreateValueLogicalTypeFromStatNode(node.second.children, field)});
+			children.push_back({node.first, CreateValueLogicalTypeFromStatNode(*node.second.children, field)});
 		}
 	}
 
@@ -178,7 +185,7 @@ static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, Stat
 struct WriteMetaData {
 	static LogicalType GetStatsType(optional_ptr<const DeltaDataFile> file) {
 		if (file && !file->column_stats.empty()) {
-			unordered_map<string, StatNode> result;
+			StatNodeMap result;
 			for (auto stat : file->column_stats) {
 				ParseStatsType(stat.first, 0, stat.second, result);
 			}
@@ -537,6 +544,10 @@ void DeltaTransaction::InitializeTransaction(ClientContext &context) {
 }
 
 void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile> &append_files) {
+	// Short-circuit: no files to append — do not start a kernel transaction.
+	if (append_files.empty()) {
+		return;
+	}
 	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
 		InitializeTransaction(context);
 	}

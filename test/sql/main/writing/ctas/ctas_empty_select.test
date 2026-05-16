@@ -1,0 +1,30 @@
+# name: test/sql/main/writing/ctas/ctas_empty_select.test
+# description: CREATE TABLE AS SELECT producing zero rows still creates a valid Delta table
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/ctas/empty' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t AS SELECT 42 AS x WHERE false;
+
+# Row count should be 0 but table should exist
+query I
+SELECT count(*) FROM t;
+----
+0
+
+# Schema should be present
+query I
+SELECT column_name FROM (DESCRIBE t);
+----
+x
+
+statement ok
+DETACH t;

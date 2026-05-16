@@ -29,6 +29,7 @@ set(EXTENSION_SOURCES
     src/path_utils.cpp
     src/storage/delta_insert.cpp
     src/storage/delta_catalog.cpp
+    src/storage/delta_ctas.cpp
     src/storage/delta_schema_entry.cpp
     src/storage/delta_table_entry.cpp
     src/storage/delta_transaction.cpp

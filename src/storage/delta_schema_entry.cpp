@@ -3,6 +3,7 @@
 #include "delta_utils.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 #include "storage/delta_catalog.hpp"
+#include "storage/delta_ctas.hpp"
 
 #include "delta_extension.hpp"
 
@@ -10,13 +11,16 @@
 #include "storage/delta_transaction.hpp"
 
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/parser/constraints/list.hpp"
+#include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
+#include "duckdb/common/enums/on_create_conflict.hpp"
 
 namespace duckdb {
 
@@ -26,15 +30,70 @@ DeltaSchemaEntry::DeltaSchemaEntry(Catalog &catalog, CreateSchemaInfo &info) : S
 DeltaSchemaEntry::~DeltaSchemaEntry() {
 }
 
-DeltaTransaction &GetDeltaTransaction(CatalogTransaction transaction) {
-	if (!transaction.transaction) {
-		throw InternalException("No transaction!?");
-	}
-	return transaction.transaction->Cast<DeltaTransaction>();
-}
-
 optional_ptr<CatalogEntry> DeltaSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
-	throw BinderException("Delta tables do not support creating tables");
+	auto &create_info = info.Base();
+	auto &delta_catalog = catalog.Cast<DeltaCatalog>();
+
+	//! CREATE OR REPLACE TABLE is not supported in v1.
+	if (create_info.on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT) {
+		throw BinderException("Delta tables do not support CREATE OR REPLACE TABLE");
+	}
+
+	//! Verify the table name matches the catalog name (Delta catalogs are single-table).
+	const string &table_name = create_info.table;
+	if (!table_name.empty() && table_name != delta_catalog.GetName() &&
+	    (delta_catalog.internal_table_name.empty() || table_name != delta_catalog.internal_table_name)) {
+		throw BinderException("Delta catalog '%s' only supports a single table named '%s'. Cannot create table '%s'.",
+		                      delta_catalog.GetName(), delta_catalog.GetName(), table_name);
+	}
+
+	//! Validate partition columns: each referenced column must exist in the column list.
+	const auto &columns = create_info.columns;
+	for (const auto &pk : create_info.partition_keys) {
+		if (pk->type != ExpressionType::COLUMN_REF) {
+			throw BinderException("Delta CTAS partition key must be a simple column reference, not an expression");
+		}
+		auto &colref = pk->Cast<ColumnRefExpression>();
+		const string &pk_name = colref.GetColumnName();
+		bool found = false;
+		for (const auto &col_def : columns.Logical()) {
+			if (StringUtil::CIEquals(col_def.Name(), pk_name)) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			throw BinderException("Partition column '%s' does not exist in the table schema", pk_name);
+		}
+	}
+
+	//! Validate that all column types have Delta representations (throws BinderException on unsupported types).
+	DeltaSchemaJson::BuildSchemaString(columns);
+
+	//! Check whether the path already contains a valid Delta table.
+	const string &delta_path = delta_catalog.path;
+	const string delta_log_dir = delta_path + "/_delta_log";
+	const string version0_path = delta_log_dir + "/00000000000000000000.json";
+
+	if (!transaction.HasContext()) {
+		throw InternalException("CreateTable requires a client context");
+	}
+	auto &context = transaction.GetContext();
+	auto &fs = FileSystem::GetFileSystem(context);
+
+	if (fs.FileExists(version0_path)) {
+		//! A Delta table already exists at this path — reject.
+		throw CatalogException("Cannot create Delta table at path '%s': a Delta table already exists there "
+		                       "(found _delta_log/00000000000000000000.json). "
+		                       "Use a different path or detach and re-attach with a fresh path.",
+		                       delta_path);
+	}
+
+	//! Validation passed and no existing table found. For Delta catalogs, CTAS is the only
+	//! supported table-creation path — bare CREATE TABLE (without AS SELECT) is not meaningful
+	//! because the kernel log is written by DeltaInsert::GetGlobalSinkState, not here.
+	//! Return nullptr; the planner will route CTAS through PlanCreateTableAs instead.
+	return nullptr;
 }
 
 optional_ptr<CatalogEntry> DeltaSchemaEntry::CreateFunction(CatalogTransaction transaction, CreateFunctionInfo &info) {
@@ -181,7 +240,10 @@ optional_ptr<CatalogEntry> DeltaSchemaEntry::LookupEntry(CatalogTransaction tran
 	auto &delta_catalog = catalog.Cast<DeltaCatalog>();
 
 	if (type == CatalogType::TABLE_ENTRY && (name == catalog.GetName() || name == delta_catalog.internal_table_name)) {
-		auto &delta_transaction = GetDeltaTransaction(transaction);
+		if (!transaction.transaction) {
+			throw InternalException("No transaction in DeltaSchemaEntry::LookupEntry");
+		}
+		auto &delta_transaction = transaction.transaction->Cast<DeltaTransaction>();
 
 		idx_t version = delta_catalog.use_specific_version;
 
@@ -205,6 +267,16 @@ optional_ptr<CatalogEntry> DeltaSchemaEntry::LookupEntry(CatalogTransaction tran
 			}
 
 			if (!cached_table) {
+				//! If allow_create is enabled and the Delta log doesn't exist yet, return nullptr
+				//! (table not found). This check runs only before the first successful table
+				//! initialization; once cached_table is set the table is known to exist.
+				if (delta_catalog.allow_create) {
+					auto &fs = FileSystem::GetFileSystem(context);
+					const string version0_path = delta_catalog.path + "/_delta_log/00000000000000000000.json";
+					if (!fs.FileExists(version0_path)) {
+						return nullptr;
+					}
+				}
 				cached_table = CreateTableEntry(context, version, nullptr);
 			}
 			return *cached_table;
@@ -212,6 +284,16 @@ optional_ptr<CatalogEntry> DeltaSchemaEntry::LookupEntry(CatalogTransaction tran
 			unique_lock<mutex> l(lock);
 
 			if (!cached_table) {
+				//! If allow_create is enabled and the Delta log doesn't exist yet, return nullptr
+				//! (table not found). This check runs only before the first successful table
+				//! initialization; once cached_table is set the table is known to exist.
+				if (delta_catalog.allow_create) {
+					auto &fs = FileSystem::GetFileSystem(context);
+					const string version0_path = delta_catalog.path + "/_delta_log/00000000000000000000.json";
+					if (!fs.FileExists(version0_path)) {
+						return nullptr;
+					}
+				}
 				cached_table = CreateTableEntry(context, version, nullptr);
 			}
 

@@ -1,0 +1,26 @@
+# name: test/sql/main/writing/ctas/ctas_attach_existing.test
+# description: CTAS to a path where a Delta table already exists should fail
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# First create a Delta table at the path
+statement ok
+FROM copy_dir('data/inlined/simple_table/delta_lake', '__TEST_DIR__/ctas/existing');
+
+# Attaching with allow_create true to an existing table should still work for reads
+statement ok
+ATTACH '__TEST_DIR__/ctas/existing' AS t (TYPE delta, allow_create true);
+
+# CTAS should fail because the table already exists
+statement error
+CREATE TABLE t.t AS SELECT 1 AS i;
+----
+Delta table already exists
+
+statement ok
+DETACH t;

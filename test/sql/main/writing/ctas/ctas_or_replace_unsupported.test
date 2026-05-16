@@ -1,0 +1,17 @@
+# name: test/sql/main/writing/ctas/ctas_or_replace_unsupported.test
+# description: CREATE OR REPLACE TABLE AS SELECT is not supported for Delta tables
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/ctas/no_replace' AS t (TYPE delta, allow_create true);
+
+statement error
+CREATE OR REPLACE TABLE t.t AS SELECT 1 AS x;
+----
+CREATE OR REPLACE TABLE is not supported for Delta tables

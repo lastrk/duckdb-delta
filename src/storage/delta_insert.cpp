@@ -1,7 +1,13 @@
 #include "storage/delta_insert.hpp"
+#include "storage/delta_ctas.hpp"
+#include "storage/delta_schema_entry.hpp"
 
 #include "duckdb/common/sorting/hashed_sort.hpp"
 #include "duckdb/common/path.hpp"
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/file_open_flags.hpp"
+#include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 
 #include "duckdb/catalog/catalog_entry_retriever.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
@@ -21,6 +27,7 @@
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 
 namespace duckdb {
@@ -62,9 +69,76 @@ public:
 };
 
 unique_ptr<GlobalSinkState> DeltaInsert::GetGlobalSinkState(ClientContext &context) const {
-	// TODO: handle null table once CREATE TABLE (AS SELECT) is supported; columns/constraints come from info->Base()
-	const auto &delta_table = table->Cast<DeltaTableEntry>();
-	return make_uniq<DeltaInsertGlobalState>(delta_table);
+	if (table) {
+		//! Regular INSERT path: table already exists.
+		const auto &delta_table = table->Cast<DeltaTableEntry>();
+		return make_uniq<DeltaInsertGlobalState>(delta_table);
+	}
+
+	//! CTAS path: table doesn't exist yet — create the Delta log and initialize the snapshot.
+	D_ASSERT(schema);
+	D_ASSERT(info);
+
+	auto &delta_catalog = schema->catalog.Cast<DeltaCatalog>();
+	auto &delta_transaction = DeltaTransaction::Get(context, delta_catalog);
+
+	//! Build the filesystem path for the Delta log directory and version-0 commit file.
+	const string &delta_path = delta_catalog.path;
+	auto &fs = FileSystem::GetFileSystem(context);
+	const string delta_log_dir = delta_path + "/_delta_log";
+
+	//! The table root directory was already created in PlanCreateTableAs (before the parquet
+	//! child pipeline runs). Here we only need to create the _delta_log subdirectory.
+	if (!fs.DirectoryExists(delta_log_dir)) {
+		fs.CreateDirectory(delta_log_dir);
+	}
+
+	//! Construct the version-0 JSON content (Protocol + Metadata).
+	auto &create_info = info->Base();
+	const string schema_string = DeltaSchemaJson::BuildSchemaString(create_info.columns);
+
+	//! Extract partition column names from partition_keys.
+	//! Expression type was validated at bind time in PlanCreateTableAs.
+	vector<string> partition_cols;
+	for (const auto &pk : create_info.partition_keys) {
+		if (pk->type != ExpressionType::COLUMN_REF) {
+			throw BinderException("Delta CTAS PARTITIONED BY only supports simple column references");
+		}
+		partition_cols.push_back(pk->Cast<ColumnRefExpression>().GetColumnName());
+	}
+
+	//! Generate a stable table ID and timestamp.
+	const string table_id = UUID::ToString(UUID::GenerateRandomUUID());
+	const int64_t created_time_ms = Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp());
+
+	const string commit_json_content =
+	    DeltaSchemaJson::BuildCommitJson(table_id, schema_string, partition_cols, created_time_ms);
+
+	//! Write the version-0 commit file atomically (step 1) and initialize the kernel snapshot
+	//! (step 2). If either step throws, remove the commit file so a retry to the same path
+	//! does not fail with "Delta table already exists".
+	const string version0_path = delta_log_dir + "/00000000000000000000.json";
+	try {
+		auto handle =
+		    fs.OpenFile(version0_path, FileOpenFlags::FILE_FLAGS_WRITE | FileOpenFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		handle->Write(const_cast<void *>(static_cast<const void *>(commit_json_content.data())),
+		              commit_json_content.size());
+		handle.reset();
+
+		//! Initialize the kernel snapshot from the newly-written log and register it in the transaction.
+		//! InitializeTableEntry calls CreateTableEntry which reads the Delta log the kernel just needs to parse.
+		//! const_cast: schema is only const because GetGlobalSinkState is const; the underlying object is mutable.
+		auto &delta_schema_entry = const_cast<DeltaSchemaEntry &>(schema->Cast<DeltaSchemaEntry>());
+		auto &registered_entry =
+		    delta_transaction.InitializeTableEntry(context, delta_schema_entry, DConstants::INVALID_INDEX, nullptr);
+
+		return make_uniq<DeltaInsertGlobalState>(registered_entry);
+	} catch (...) {
+		//! Clean up the partially-written log file so a subsequent CTAS to the same path
+		//! does not fail with "Delta table already exists".
+		fs.TryRemoveFile(version0_path);
+		throw;
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -264,11 +338,16 @@ SinkFinalizeType DeltaInsert::Finalize(Pipeline &pipeline, Event &event, ClientC
                                        OperatorSinkFinalizeInput &input) const {
 	auto &global_state = input.global_state.Cast<DeltaInsertGlobalState>();
 
-	// TODO: handle null table once CREATE TABLE (AS SELECT) is supported; create the table first, then use
-	// schema->catalog
-	auto &transaction = DeltaTransaction::Get(context, table->catalog);
-	vector<string> filenames;
-	transaction.Append(context, global_state.written_files);
+	if (table) {
+		//! Regular INSERT path: use the existing table's catalog.
+		auto &transaction = DeltaTransaction::Get(context, table->catalog);
+		transaction.Append(context, global_state.written_files);
+	} else {
+		//! CTAS path: the table was just created in GetGlobalSinkState; use schema's catalog.
+		D_ASSERT(schema);
+		auto &transaction = DeltaTransaction::Get(context, schema->catalog);
+		transaction.Append(context, global_state.written_files);
+	}
 
 	return SinkFinalizeType::READY;
 }
@@ -342,8 +421,8 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	vector<idx_t> partition_columns;
 	if (!partitions.empty()) {
 		auto column_names = table_entry->GetColumns().GetColumnNames();
-		for (int64_t i = 0; i < partitions.size(); i++) {
-			for (int64_t j = 0; j < column_names.size(); j++) {
+		for (idx_t i = 0; i < partitions.size(); i++) {
+			for (idx_t j = 0; j < column_names.size(); j++) {
 				if (column_names[j] == partitions[i]) {
 					partition_columns.push_back(j);
 					break;

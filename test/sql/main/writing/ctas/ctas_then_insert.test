@@ -1,0 +1,38 @@
+# name: test/sql/main/writing/ctas/ctas_then_insert.test
+# description: INSERT INTO a table after CTAS should produce the correct row count
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/ctas/insert_after' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t AS SELECT 1 AS x UNION ALL SELECT 2;
+
+query I
+SELECT count(*) FROM t;
+----
+2
+
+statement ok
+INSERT INTO t VALUES (3);
+
+query I
+SELECT count(*) FROM t;
+----
+3
+
+query I rowsort
+SELECT x FROM t;
+----
+1
+2
+3
+
+statement ok
+DETACH t;
