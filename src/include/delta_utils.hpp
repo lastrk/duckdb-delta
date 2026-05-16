@@ -139,7 +139,8 @@ private:
 	static void VisitDateLiteral(void *state, uintptr_t sibling_list_id, int32_t value);
 	static void VisitStringLiteral(void *state, uintptr_t sibling_list_id, ffi::KernelStringSlice value);
 	static void VisitBinaryLiteral(void *state, uintptr_t sibling_list_id, const uint8_t *buffer, uintptr_t len);
-	static void VisitNullLiteral(void *state, uintptr_t sibling_list_id);
+	static void VisitNullLiteral(void *state, uintptr_t sibling_list_id, uint8_t type_tag, uint8_t precision,
+	                             uint8_t scale);
 	static void VisitArrayLiteral(void *state, uintptr_t sibling_list_id, uintptr_t child_id);
 	static void VisitStructLiteral(void *data, uintptr_t sibling_list_id, uintptr_t child_field_list_value,
 	                               uintptr_t child_value_list_id);
@@ -399,6 +400,8 @@ typedef TemplatedUniqueKernelPointer<ffi::SharedScanMetadataIterator, ffi::free_
     KernelScanDataIterator;
 typedef TemplatedUniqueKernelPointer<ffi::ExclusiveTransaction, ffi::free_transaction> KernelExclusiveTransaction;
 typedef TemplatedUniqueKernelPointer<ffi::ExclusiveEngineData, ffi::free_engine_data> KernelEngineData;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveCommittedTransaction, ffi::free_committed_transaction>
+    KernelCommittedTransaction;
 
 template <typename KernelType, void (*DeleteFunction)(KernelType *)>
 struct SharedKernelPointer;

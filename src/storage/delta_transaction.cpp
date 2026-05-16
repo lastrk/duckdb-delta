@@ -299,17 +299,6 @@ struct WriteMetaData {
 	unique_ptr<DataChunk> buffer;
 };
 
-vector<DeltaMultiFileColumnDefinition> DeltaTransaction::GetWriteSchema(ClientContext &context) {
-	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
-		InitializeTransaction(context);
-	}
-
-	auto write_context = ffi::get_write_context(kernel_transaction.get());
-	auto result =
-	    SchemaVisitor::VisitWriteContextSchema(write_entry.get()->snapshot->extern_engine.get(), write_context);
-	return result;
-}
-
 void DeltaTransaction::CleanUpFiles() {
 	// Clean up the files created by this transaction
 	auto context_ptr = context.lock();
@@ -470,12 +459,15 @@ void DeltaTransaction::Commit(ClientContext &context) {
 
 			// We have some special error handling here to ensure the error created by DuckDB is properly thrown here,
 			// because we can't throw it across the FFI boundary, we need to store it in the transaction
-			uint64_t commit_result;
-
 			DUCKDB_LOG_INTERNAL(context, "delta.Commit", LogLevel::LOG_DEBUG, "Committing %s",
 			                    table_entry->snapshot->GetPath());
+
+			ffi::ExclusiveCommittedTransaction *committed_txn_ptr = nullptr;
 			auto res = KernelUtils::TryUnpackResult(
-			    ffi::commit(kernel_transaction.release(), table_entry->snapshot->extern_engine.get()), commit_result);
+			    ffi::commit(kernel_transaction.release(), table_entry->snapshot->extern_engine.get()),
+			    committed_txn_ptr);
+			// Wrap the handle in RAII so it is always freed on scope exit, even on error paths
+			KernelCommittedTransaction committed_txn(committed_txn_ptr);
 			if (res.HasError()) {
 				if (active_error.HasError()) {
 					active_error.Throw();
@@ -483,6 +475,7 @@ void DeltaTransaction::Commit(ClientContext &context) {
 					res.Throw();
 				}
 			}
+			// committed_txn goes out of scope here and frees the ExclusiveCommittedTransaction handle
 		}
 	}
 }

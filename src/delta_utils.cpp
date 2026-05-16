@@ -248,7 +248,9 @@ void ExpressionVisitor::VisitBinaryLiteral(void *state, uintptr_t sibling_list_i
 	auto expression = make_uniq<ConstantExpression>(Value::BLOB(buffer, len));
 	static_cast<ExpressionVisitor *>(state)->AppendToList(sibling_list_id, std::move(expression));
 }
-void ExpressionVisitor::VisitNullLiteral(void *state, uintptr_t sibling_list_id) {
+void ExpressionVisitor::VisitNullLiteral(void *state, uintptr_t sibling_list_id, uint8_t type_tag, uint8_t precision,
+                                         uint8_t scale) {
+	// We emit an untyped NULL; the kernel's NullTypeTag information is not yet used for pushdown.
 	auto expression = make_uniq<ConstantExpression>(Value());
 	static_cast<ExpressionVisitor *>(state)->AppendToList(sibling_list_id, std::move(expression));
 }
