@@ -3,7 +3,6 @@
 #include "delta_utils.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 #include "storage/delta_catalog.hpp"
-#include "storage/delta_ctas.hpp"
 
 #include "delta_extension.hpp"
 
@@ -66,9 +65,6 @@ optional_ptr<CatalogEntry> DeltaSchemaEntry::CreateTable(CatalogTransaction tran
 			throw BinderException("Partition column '%s' does not exist in the table schema", pk_name);
 		}
 	}
-
-	//! Validate that all column types have Delta representations (throws BinderException on unsupported types).
-	DeltaSchemaJson::BuildSchemaString(columns);
 
 	//! Check whether the path already contains a valid Delta table.
 	const string &delta_path = delta_catalog.path;

@@ -1,0 +1,151 @@
+# name: test/sql/main/writing/ctas/ctas_kernel_native.test
+# description: Verify kernel-emitted commit shape for CTAS (engineInfo, operation, protocol,
+#              metaData, schemaString) and exercise nested type visitor paths (STRUCT, DECIMAL).
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: Check the commit JSON shape of a basic CTAS
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/native/basic' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 AS SELECT 42 AS num, 'world' AS txt;
+
+# The commit JSON must contain engineInfo set to "DuckDB".
+query I
+SELECT content LIKE '%"engineInfo":"DuckDB"%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# The commit JSON must contain an "operation" field (exact value is kernel-defined).
+query I
+SELECT content LIKE '%"operation":%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# The commit JSON must contain a "protocol" action.
+query I
+SELECT content LIKE '%"protocol":%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# The commit JSON must contain a "metaData" action.
+query I
+SELECT content LIKE '%"metaData":%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# The schemaString must reference the declared column names.
+query I
+SELECT content LIKE '%"schemaString":%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# Column names appear inside the escaped schemaString value (e.g. \"name\":\"num\"),
+# so use unquoted substring matching.
+query I
+SELECT content LIKE '%num%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+query I
+SELECT content LIKE '%txt%' FROM read_text('__TEST_DIR__/native/basic/_delta_log/00000000000000000000.json');
+----
+true
+
+# Data is readable via a fresh attach.
+statement ok
+DETACH t1;
+
+statement ok
+ATTACH '__TEST_DIR__/native/basic' AS t1r (TYPE delta);
+
+query II
+SELECT num, txt FROM t1r;
+----
+42	world
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: STRUCT column — exercises the recursive visit_field_struct path
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/native/struct_col' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 AS
+SELECT
+	{'city': 'Paris', 'zip': '75001'} AS address,
+	99 AS score;
+
+query I
+SELECT count(*) FROM t2;
+----
+1
+
+# Read back the nested struct field.
+query II
+SELECT address['city'], score FROM t2;
+----
+Paris	99
+
+statement ok
+DETACH t2;
+
+# Verify the struct schema round-trips through a re-attach.
+statement ok
+ATTACH '__TEST_DIR__/native/struct_col' AS t2r (TYPE delta);
+
+query II
+SELECT address['city'], score FROM t2r;
+----
+Paris	99
+
+statement ok
+DETACH t2r;
+
+# ---------------------------------------------------------------------------
+# Part 3: DECIMAL column — exercises visit_field_decimal precision/scale path
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/native/decimal_col' AS t3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3.t3 AS
+SELECT
+	CAST(1234.567 AS DECIMAL(10, 3)) AS amount,
+	'USD' AS currency;
+
+query I
+SELECT count(*) FROM t3;
+----
+1
+
+query II
+SELECT amount, currency FROM t3;
+----
+1234.567	USD
+
+statement ok
+DETACH t3;
+
+# Verify the decimal value round-trips correctly after re-attach.
+statement ok
+ATTACH '__TEST_DIR__/native/decimal_col' AS t3r (TYPE delta);
+
+query II
+SELECT amount, currency FROM t3r;
+----
+1234.567	USD
+
+statement ok
+DETACH t3r;

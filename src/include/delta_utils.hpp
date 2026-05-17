@@ -402,6 +402,10 @@ typedef TemplatedUniqueKernelPointer<ffi::ExclusiveTransaction, ffi::free_transa
 typedef TemplatedUniqueKernelPointer<ffi::ExclusiveEngineData, ffi::free_engine_data> KernelEngineData;
 typedef TemplatedUniqueKernelPointer<ffi::ExclusiveCommittedTransaction, ffi::free_committed_transaction>
     KernelCommittedTransaction;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveCreateTableBuilder, ffi::free_create_table_builder>
+    KernelExclusiveCreateTableBuilder;
+typedef TemplatedUniqueKernelPointer<ffi::ExclusiveCreateTransaction, ffi::create_table_free_transaction>
+    KernelExclusiveCreateTransaction;
 
 template <typename KernelType, void (*DeleteFunction)(KernelType *)>
 struct SharedKernelPointer;

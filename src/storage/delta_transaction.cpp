@@ -4,6 +4,7 @@
 #include "path_utils.hpp"
 #include "functions/delta_scan/delta_scan.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
+#include "storage/delta_create_table_schema.hpp"
 
 #include <duckdb/main/client_data.hpp>
 
@@ -23,6 +24,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
 
 namespace duckdb {
 
@@ -256,6 +259,36 @@ struct WriteMetaData {
 		}
 	}
 
+	//! Constructor for the CTAS path where no kernel snapshot exists yet.
+	//! table_path must be the delta-protocol path (with trailing slash) as stored in
+	//! DeltaTransaction::ctas_table_path. partition_col_names must be in the same order as
+	//! DeltaPartition::partition_column_idx values produced during the parquet write.
+	WriteMetaData(const string &table_path, const vector<string> &partition_col_names,
+	              vector<DeltaDataFile> &outstanding_appends) {
+		const DeltaDataFile *first_file = outstanding_appends.empty() ? nullptr : &outstanding_appends[0];
+		buffer_types = GetTypes(first_file);
+		buffer = make_uniq<DataChunk>();
+		buffer->Initialize(Allocator::DefaultAllocator(), buffer_types);
+
+		for (const auto &file : outstanding_appends) {
+			// consume any leading '/' chars to be certain path is relative -- as seen in #268 they corrupt (for spark)
+			// https://github.com/duckdb/duckdb-delta/issues/268
+			auto file_name_offset = table_path.size();
+			for (; file.file_name[file_name_offset] == '/'; ++file_name_offset) {
+			}
+			auto file_name = file.file_name.substr(file_name_offset);
+			D_ASSERT(!StringUtil::StartsWith(file_name, "/"));
+
+			InsertionOrderPreservingMap<string> partitions = {};
+			for (const auto &part : file.partition_values) {
+				D_ASSERT(part.partition_column_idx < partition_col_names.size());
+				partitions.insert({partition_col_names[part.partition_column_idx], part.partition_value});
+			}
+
+			Append(file_name, Value::MAP(partitions), file);
+		}
+	}
+
 	void Append(const string &path, Value partition_values, const DeltaDataFile &file) {
 		idx_t current_size = buffer->size();
 		idx_t current_capacity = buffer->GetCapacity();
@@ -407,6 +440,28 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 void DeltaTransaction::Commit(ClientContext &context) {
 	if (transaction_state == DeltaTransactionState::TRANSACTION_STARTED) {
 		transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
+
+		if (mode == DeltaTransactionMode::CREATING_TABLE) {
+			D_ASSERT(kernel_create_txn.get()); // Must have been initialized by InitializeForNewTable.
+
+			DUCKDB_LOG_INTERNAL(context, "delta.Commit", LogLevel::LOG_DEBUG, "Committing new table at %s",
+			                    ctas_table_path);
+
+			ffi::ExclusiveCommittedTransaction *committed_txn_ptr = nullptr;
+			auto res = KernelUtils::TryUnpackResult(
+			    ffi::create_table_commit(kernel_create_txn.release(), ctas_extern_engine.get()), committed_txn_ptr);
+			// RAII wrapper ensures free_committed_transaction fires on scope exit.
+			KernelCommittedTransaction committed_txn(committed_txn_ptr);
+			if (res.HasError()) {
+				if (active_error.HasError()) {
+					active_error.Throw();
+				} else {
+					res.Throw();
+				}
+			}
+			// committed_txn goes out of scope here and frees the ExclusiveCommittedTransaction handle.
+			return;
+		}
 
 		if (!outstanding_appends.empty()) {
 			// Finally we add the registered transaction versions
@@ -574,6 +629,113 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 
 		ffi::add_files(kernel_transaction.get(), write_metadata_engine_data.release());
 	}
+}
+
+void DeltaTransaction::InitializeForNewTable(ClientContext &context, const string &table_path,
+                                             BoundCreateTableInfo &info) {
+	if (access_mode == AccessMode::READ_ONLY) {
+		throw InvalidInputException("Cannot create a Delta table in read-only mode");
+	}
+	D_ASSERT(mode == DeltaTransactionMode::REGULAR); // Must only be called once.
+
+	if (parent_commit) {
+		// CCv2 CTAS is deferred to a follow-up PR. Raise now so the user gets a clear message.
+		throw NotImplementedException(
+		    "CREATE TABLE AS SELECT with Unity Catalog managed commits (parent_commit=true) is not yet "
+		    "supported. Use a non-managed catalog for CTAS, or insert into the table in a separate step.");
+	}
+
+	auto &create_info = info.Base();
+
+	// Fast pre-validation: walk the column list and throw BinderException for any type
+	// that has no Delta representation, before spending time on engine construction.
+	// This avoids initialising the Tokio runtime (and cloud credentials) for an invalid schema.
+	DeltaCreateTableSchema::ValidateTypes(create_info.columns);
+
+	// Build the engine from the table path using DuckDB's secret/credential lookup.
+	// The Delta log does not need to exist for the engine to be constructed.
+	ctas_extern_engine = DeltaMultiFileList::BuildEngine(context, table_path);
+
+	// Record the normalised delta-protocol path (with trailing slash) and partition columns.
+	ctas_table_path = DeltaMultiFileList::ToDeltaPath(table_path);
+	for (const auto &pk : create_info.partition_keys) {
+		D_ASSERT(pk->type == ExpressionType::COLUMN_REF); // Validated at bind time.
+		ctas_partition_columns.push_back(pk->Cast<ColumnRefExpression>().GetColumnName());
+	}
+
+	// Build the engine-side schema visitor. The visitor must outlive the FFI call that
+	// consumes the EngineSchema; it is stack-local to this function.
+	DeltaCreateTableSchema schema_visitor(create_info.columns);
+	ffi::EngineSchema engine_schema = schema_visitor.GetEngineSchema();
+
+	// Step 1: obtain the create-table builder.
+	const string engine_info_str = "DuckDB";
+	ffi::ExclusiveCreateTableBuilder *builder_raw = nullptr;
+	auto builder_res = KernelUtils::TryUnpackResult(
+	    ffi::get_create_table_builder(KernelUtils::ToDeltaString(ctas_table_path), &engine_schema,
+	                                  KernelUtils::ToDeltaString(engine_info_str), ctas_extern_engine.get()),
+	    builder_raw);
+	KernelExclusiveCreateTableBuilder builder(builder_raw);
+	if (builder_res.HasError()) {
+		// Prefer the DuckDB-typed error from the visitor (e.g. BinderException) over the
+		// kernel's generic error string wrapped in IOException.
+		if (schema_visitor.HasError()) {
+			schema_visitor.TakeError().Throw();
+		}
+		builder_res.Throw();
+	}
+
+	// Step 2: build the exclusive-create-transaction (default FileSystemCommitter path).
+	ffi::ExclusiveCreateTransaction *txn_raw = nullptr;
+	auto build_res = KernelUtils::TryUnpackResult(
+	    ffi::create_table_builder_build(builder.release(), ctas_extern_engine.get()), txn_raw);
+	kernel_create_txn = KernelExclusiveCreateTransaction(txn_raw);
+	if (build_res.HasError()) {
+		build_res.Throw();
+	}
+
+	// Step 3: transition mode.
+	mode = DeltaTransactionMode::CREATING_TABLE;
+	transaction_state = DeltaTransactionState::TRANSACTION_STARTED;
+	current_context = context.shared_from_this();
+}
+
+void DeltaTransaction::AppendForNewTable(ClientContext &context, const vector<DeltaDataFile> &append_files) {
+	D_ASSERT(mode == DeltaTransactionMode::CREATING_TABLE);
+
+	if (append_files.empty()) {
+		// Empty CTAS: commit Protocol+Metadata only, no Add actions. Valid per Delta spec.
+		return;
+	}
+
+	// Record last-modified time for each file (same pattern as Append()).
+	idx_t start = outstanding_appends.size();
+	outstanding_appends.insert(outstanding_appends.end(), append_files.begin(), append_files.end());
+	for (idx_t file_idx = start; file_idx < outstanding_appends.size(); file_idx++) {
+		auto &file = outstanding_appends[file_idx];
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto f = fs.OpenFile(file.file_name, FileOpenFlags::FILE_FLAGS_READ);
+		file.last_modified_time = f->file_system.GetLastModifiedTime(*f);
+	}
+
+	// Build WriteMetaData for the new files using the CTAS path and partition column names.
+	// ctas_table_path and ctas_partition_columns were stored by InitializeForNewTable.
+	vector<DeltaDataFile> new_files(outstanding_appends.begin() + NumericCast<ptrdiff_t>(start),
+	                                outstanding_appends.end());
+	WriteMetaData write_metadata(ctas_table_path, ctas_partition_columns, new_files);
+	auto write_metadata_ffi = write_metadata.ToArrow(context);
+
+	ffi::ExclusiveEngineData *engine_data_raw = nullptr;
+	auto err = KernelUtils::TryUnpackResult(
+	    ffi::get_engine_data(write_metadata_ffi.array, &write_metadata_ffi.schema, DuckDBEngineError::AllocateError),
+	    engine_data_raw);
+	if (err.HasError()) {
+		err.Throw();
+	}
+	KernelEngineData write_metadata_engine_data(engine_data_raw);
+
+	// create_table_add_files is void — errors surface at commit time.
+	ffi::create_table_add_files(kernel_create_txn.get(), write_metadata_engine_data.release());
 }
 
 void DeltaTransaction::SetTransactionVersion(const string &app_id_p, idx_t new_version_p, Value expected_version_p) {

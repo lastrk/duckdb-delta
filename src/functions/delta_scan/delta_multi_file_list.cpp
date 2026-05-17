@@ -524,6 +524,19 @@ void ScanDataCallBack::VisitData(ffi::NullableCvoid engine_context,
 	}
 }
 
+KernelExternEngine DeltaMultiFileList::BuildEngine(ClientContext &context, const string &path) {
+	// ToDeltaPath normalises the path (adds trailing slash, resolves ./). CreateBuilder
+	// sets up storage credentials (secrets) for the resulting delta-protocol path.
+	auto delta_path = ToDeltaPath(path);
+	auto *builder = CreateBuilder(context, delta_path);
+	ffi::SharedExternEngine *engine_raw = nullptr;
+	auto err = KernelUtils::TryUnpackResult(ffi::builder_build(builder), engine_raw);
+	if (err.HasError()) {
+		err.Throw();
+	}
+	return KernelExternEngine(engine_raw);
+}
+
 DeltaMultiFileList::DeltaMultiFileList(ClientContext &context_p, const string &path_p, idx_t version_p,
                                        optional_ptr<const DeltaMultiFileList> previous)
     : SimpleMultiFileList({ToDeltaPath(path_p)}), version(version_p) {

@@ -1,5 +1,4 @@
 #include "storage/delta_catalog.hpp"
-#include "storage/delta_ctas.hpp"
 #include "storage/delta_insert.hpp"
 #include "storage/delta_schema_entry.hpp"
 #include "storage/delta_transaction.hpp"
@@ -136,12 +135,6 @@ PhysicalOperator &DeltaCatalog::PlanCreateTableAs(ClientContext &context, Physic
 	auto &columns = create_info.columns;
 	auto names_to_write = columns.GetColumnNames();
 	auto types_to_write = columns.GetColumnTypes();
-
-	//! Validate column types have Delta representations (throws BinderException on unsupported types).
-	//! This runs at bind time so the error surfaces before any I/O is performed.
-	//! ValidateColumnTypes is used here (not BuildSchemaString) to avoid allocating the JSON string
-	//! at plan time — GetGlobalSinkState builds it when actually needed.
-	DeltaSchemaJson::ValidateColumnTypes(columns);
 
 	//! Validate partition keys and resolve them as indices into the column list.
 	vector<idx_t> partition_columns;

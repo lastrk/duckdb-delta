@@ -63,6 +63,11 @@ public:
 	static string ToDuckDBPath(const string &raw_path);
 	static string ToDeltaPath(const string &raw_path);
 
+	//! Build a kernel engine handle from a table path, applying DuckDB secrets.
+	//! The returned handle must be freed by the caller (or wrapped in KernelExternEngine).
+	//! Used by the CTAS path to obtain an engine before the Delta log exists.
+	static KernelExternEngine BuildEngine(ClientContext &context, const string &path);
+
 	//! MultiFileList API
 public:
 	void Bind(vector<LogicalType> &return_types, vector<string> &names);

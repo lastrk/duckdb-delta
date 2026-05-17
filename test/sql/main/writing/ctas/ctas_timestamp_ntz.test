@@ -1,0 +1,106 @@
+# name: test/sql/main/writing/ctas/ctas_timestamp_ntz.test
+# description: Verify CTAS with timestamp_ntz types (TIMESTAMP_MS, TIMESTAMP_SEC).
+#              TIMESTAMP_NS is rejected at bind time because Delta timestamp_ntz stores
+#              microsecond precision and nanosecond sub-precision would be silently lost.
+#              TIMESTAMP_MS and TIMESTAMP_SEC are lossless (their precision fits within
+#              microsecond storage) and are accepted; values are verified on round-trip.
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# TIMESTAMP_NS must be rejected with a clear BinderException (silent data loss)
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ntz/ns' AS ntz1 (TYPE delta, allow_create true);
+
+statement error
+CREATE TABLE ntz1.ntz1 AS
+SELECT
+	CAST('2024-03-15 12:30:00.123456789' AS TIMESTAMP_NS) AS ts_ns,
+	1 AS id;
+----
+Cannot create Delta table: column 'ts_ns' has type TIMESTAMP_NS (nanosecond precision). Delta's timestamp_ntz type stores microseconds; nanosecond precision cannot be preserved. Cast to TIMESTAMP or TIMESTAMP_MS if microsecond precision is acceptable.
+
+statement ok
+DETACH ntz1;
+
+# ---------------------------------------------------------------------------
+# TIMESTAMP_MS maps to Delta timestamp_ntz (lossless) — verify values preserved
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ntz/ms' AS ntz2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE ntz2.ntz2 AS
+SELECT id, ts_ms FROM (VALUES
+	(1, CAST('2024-06-01 08:00:00.000' AS TIMESTAMP_MS)),
+	(2, CAST('2024-06-01 08:00:00.500' AS TIMESTAMP_MS)),
+	(3, CAST('2001-09-09 01:46:40.000' AS TIMESTAMP_MS))
+) t(id, ts_ms);
+
+query II
+SELECT id, ts_ms FROM ntz2 ORDER BY id;
+----
+1	2024-06-01 08:00:00
+2	2024-06-01 08:00:00.5
+3	2001-09-09 01:46:40
+
+statement ok
+DETACH ntz2;
+
+# Verify round-trip after re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ntz/ms' AS ntz2r (TYPE delta);
+
+query II
+SELECT id, ts_ms FROM ntz2r ORDER BY id;
+----
+1	2024-06-01 08:00:00
+2	2024-06-01 08:00:00.5
+3	2001-09-09 01:46:40
+
+statement ok
+DETACH ntz2r;
+
+# ---------------------------------------------------------------------------
+# TIMESTAMP_SEC maps to Delta timestamp_ntz (lossless) — verify values preserved
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ntz/sec' AS ntz3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE ntz3.ntz3 AS
+SELECT id, ts_sec FROM (VALUES
+	(1, CAST('2024-12-31 23:59:59' AS TIMESTAMP_S)),
+	(2, CAST('2000-01-01 00:00:00' AS TIMESTAMP_S)),
+	(3, CAST('1970-01-01 00:00:01' AS TIMESTAMP_S))
+) t(id, ts_sec);
+
+query II
+SELECT id, ts_sec FROM ntz3 ORDER BY id;
+----
+1	2024-12-31 23:59:59
+2	2000-01-01 00:00:00
+3	1970-01-01 00:00:01
+
+statement ok
+DETACH ntz3;
+
+# Verify round-trip after re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ntz/sec' AS ntz3r (TYPE delta);
+
+query II
+SELECT id, ts_sec FROM ntz3r ORDER BY id;
+----
+1	2024-12-31 23:59:59
+2	2000-01-01 00:00:00
+3	1970-01-01 00:00:01
+
+statement ok
+DETACH ntz3r;

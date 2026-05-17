@@ -12,6 +12,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
+class BoundCreateTableInfo;
 class DeltaCatalog;
 class DeltaSchemaEntry;
 class DeltaTableEntry;
@@ -20,6 +21,11 @@ struct DeltaDataFile;
 struct DeltaMultiFileColumnDefinition;
 
 enum class DeltaTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
+
+enum class DeltaTransactionMode : uint8_t {
+	REGULAR,       //! Table exists; uses kernel_transaction. Default.
+	CREATING_TABLE //! Table is being created via CTAS; uses kernel_create_txn.
+};
 
 class DeltaTransaction : public Transaction {
 public:
@@ -31,6 +37,24 @@ public:
 	void Rollback();
 
 	void Append(ClientContext &context, const vector<DeltaDataFile> &append_files);
+
+	//! CTAS-only: drive the kernel CreateTableBuilder → ExclusiveCreateTransaction chain and
+	//! transition the transaction to CREATING_TABLE mode. The schema is built from
+	//! info.Base().columns; partition column names are extracted from info.Base().partition_keys.
+	//! Throws InvalidInputException if access_mode == READ_ONLY.
+	//! Throws BinderException if the schema contains a type the kernel rejects.
+	//! Throws IOException for other kernel failures.
+	void InitializeForNewTable(ClientContext &context, const string &table_path, BoundCreateTableInfo &info);
+
+	//! Stage parquet files onto kernel_create_txn via create_table_add_files.
+	//! No-op if append_files is empty (empty-CTAS commits Protocol+Metadata only).
+	//! Must only be called after InitializeForNewTable() succeeds.
+	void AppendForNewTable(ClientContext &context, const vector<DeltaDataFile> &append_files);
+
+	//! True if this transaction is in CREATING_TABLE mode.
+	bool IsCreatingTable() const {
+		return mode == DeltaTransactionMode::CREATING_TABLE;
+	}
 
 	void SetTransactionVersion(const string &app_id, idx_t new_version, Value expected_value);
 
@@ -77,7 +101,23 @@ private:
 
 	vector<DeltaDataFile> outstanding_appends;
 
+	DeltaTransactionMode mode = DeltaTransactionMode::REGULAR;
+
 	KernelExclusiveTransaction kernel_transaction;
+
+	//! Held only when mode == CREATING_TABLE. Consumed by Commit() via
+	//! create_table_commit. Freed by RAII on rollback.
+	KernelExclusiveCreateTransaction kernel_create_txn;
+
+	//! CTAS-only: engine handle built for the new table (mode == CREATING_TABLE).
+	//! Owned here because the DeltaTableEntry does not exist until after commit.
+	KernelExternEngine ctas_extern_engine;
+
+	//! CTAS-only: table root path (mode == CREATING_TABLE).
+	string ctas_table_path;
+
+	//! CTAS-only: ordered partition column names (mode == CREATING_TABLE).
+	vector<string> ctas_partition_columns;
 
 	//! stores a ptr to the table entry that this transaction is writing to
 	optional_ptr<DeltaTableEntry> write_entry;
