@@ -1,0 +1,120 @@
+# name: test/sql/main/writing/ctas/ctas_ccv2.test
+# description: CCv2 CTAS via parent_commit=true with the test-only
+#              __internal_delta_test_ccv2_commit_staged fixture function.
+#              The test committer IS called during CTAS: it receives the
+#              staged commit file and promotes it to the published log path.
+#              After the CTAS commit, the session reads back data using the
+#              version stored in ccv2_committed_version on the catalog.
+#              Re-reading from a fresh attach requires max_catalog_version to
+#              be specified (catalogManaged tables always require this per the
+#              Delta protocol; in production, Unity Catalog provides it via
+#              log_tail).
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+require debug
+
+# ---------------------------------------------------------------------------
+# Test 1: Basic CCv2 CTAS — version-0 commit written via UCCommitter callback.
+# The __internal_delta_test_ccv2_commit_staged function IS called during CTAS:
+# it receives the staged commit file and promotes it to the published log path.
+# That callback is what creates _delta_log/00000000000000000000.json.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH ':memory:' AS parent;
+
+statement ok
+ATTACH '__TEST_DIR__/ccv2/t1' AS t1 (TYPE delta, allow_create true,
+                                     parent_commit true,
+                                     parent_catalog 'parent',
+                                     parent_commit_function_name '__internal_delta_test_ccv2_commit_staged',
+                                     unity_table_id 'test-table-id-1');
+
+statement ok
+CREATE TABLE t1.t1 AS SELECT 1 AS id, 'a' AS name UNION ALL SELECT 2, 'b';
+
+# The kernel's UCCommitter.commit_version_0 writes 00000000000000000000.json
+# directly — verify it exists and is non-empty.
+query I
+SELECT count(*) > 0 FROM glob('__TEST_DIR__/ccv2/t1/_delta_log/00000000000000000000.json');
+----
+true
+
+# Data is readable immediately after CTAS using the same CCv2 catalog.
+# max_catalog_version is set automatically from ccv2_committed_version (version 0)
+# stored in the catalog after the commit.
+query II rowsort
+SELECT id, name FROM t1;
+----
+1	a
+2	b
+
+statement ok
+DETACH t1;
+
+statement ok
+DETACH parent;
+
+# Re-attach with explicit max_catalog_version=0. catalogManaged tables always require
+# max_catalog_version per the Delta protocol; in production UC provides this via log_tail.
+statement ok
+ATTACH '__TEST_DIR__/ccv2/t1' AS t1r (TYPE delta, max_catalog_version 0);
+
+query II rowsort
+SELECT id, name FROM t1r;
+----
+1	a
+2	b
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Test 2: Empty CCv2 CTAS — zero rows, Protocol+Metadata commit only.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH ':memory:' AS parent2;
+
+statement ok
+ATTACH '__TEST_DIR__/ccv2/t2_empty' AS t2 (TYPE delta, allow_create true,
+                                            parent_commit true,
+                                            parent_catalog 'parent2',
+                                            parent_commit_function_name '__internal_delta_test_ccv2_commit_staged',
+                                            unity_table_id 'test-table-id-2');
+
+statement ok
+CREATE TABLE t2.t2 AS SELECT 1 AS id WHERE false;
+
+query I
+SELECT count(*) FROM t2;
+----
+0
+
+# Verify the delta log was created.
+query I
+SELECT count(*) > 0 FROM glob('__TEST_DIR__/ccv2/t2_empty/_delta_log/00000000000000000000.json');
+----
+true
+
+statement ok
+DETACH t2;
+
+statement ok
+DETACH parent2;
+
+# Re-attach with explicit max_catalog_version=0.
+statement ok
+ATTACH '__TEST_DIR__/ccv2/t2_empty' AS t2r (TYPE delta, max_catalog_version 0);
+
+query I
+SELECT count(*) FROM t2r;
+----
+0
+
+statement ok
+DETACH t2r;

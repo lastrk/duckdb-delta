@@ -29,10 +29,11 @@
 
 namespace duckdb {
 
-DeltaTransaction::DeltaTransaction(DeltaCatalog &delta_catalog, TransactionManager &manager, ClientContext &context)
-    : Transaction(manager, context), access_mode(delta_catalog.access_mode), parent_commit(delta_catalog.parent_commit),
-      parent_catalog_name(delta_catalog.parent_catalog_name), unity_table_id(delta_catalog.unity_table_id) {
-	commit_function = delta_catalog.commit_function;
+DeltaTransaction::DeltaTransaction(DeltaCatalog &delta_catalog_p, TransactionManager &manager, ClientContext &context)
+    : Transaction(manager, context), delta_catalog(delta_catalog_p), access_mode(delta_catalog_p.access_mode),
+      parent_commit(delta_catalog_p.parent_commit), parent_catalog_name(delta_catalog_p.parent_catalog_name),
+      unity_table_id(delta_catalog_p.unity_table_id) {
+	commit_function = delta_catalog_p.commit_function;
 }
 
 DeltaTransaction::~DeltaTransaction() {
@@ -353,11 +354,11 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 		if (!current_context) {
 			throw InternalException("No current client context in Catalog Commit Callback");
 		}
-		if (!transaction->write_entry) {
+		// write_entry is set for INSERT (REGULAR mode). For CTAS (CREATING_TABLE mode), no
+		// DeltaTableEntry exists during the commit — the table is being created right now.
+		// Only require write_entry when not in CREATING_TABLE mode.
+		if (transaction->mode != DeltaTransactionMode::CREATING_TABLE && !transaction->write_entry) {
 			throw InternalException("No write entry in Catalog Commit Callback");
-		}
-		if (!transaction->parent_table_entry) {
-			throw InternalException("No parent table entry in Catalog Commit Callback");
 		}
 
 		// Extract commit info from the request
@@ -369,7 +370,17 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 
 		auto &commit_info = request.commit_info.some._0;
 		auto staged_commit_path_string = KernelUtils::FromDeltaString(commit_info.file_name);
+		auto table_uri_string = KernelUtils::FromDeltaString(request.table_uri);
 		auto version = commit_info.version;
+
+		// parent_table_entry is required for version > 0 (INSERT into existing table): the parent
+		// catalog already owns the table and the commit function uses the pointer to look it up.
+		// For version 0 (CTAS: creating the table for the first time), no parent-catalog entry
+		// exists yet — the staged commit IS the table-creation event. The parent commit function
+		// MUST accept nullptr here and infer the table identity from staged_commit_path instead.
+		if (version > 0 && !transaction->parent_table_entry) {
+			throw InternalException("No parent table entry in Catalog Commit Callback (required for version > 0)");
+		}
 		auto timestamp_val = commit_info.timestamp;
 		auto size = commit_info.file_size;
 		auto file_modification_time = commit_info.file_modification_timestamp;
@@ -381,6 +392,7 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 		    {"version", Value::BIGINT(version)},
 		    {"table_entry_pointer", Value::POINTER(CastPointerToValue(transaction->parent_table_entry.get()))},
 		    {"file_modification_time", Value::BIGINT(file_modification_time)},
+		    {"table_uri", Value(table_uri_string)},
 		};
 
 		auto staged_commit_data = Value::STRUCT(children);
@@ -458,6 +470,13 @@ void DeltaTransaction::Commit(ClientContext &context) {
 				} else {
 					res.Throw();
 				}
+			}
+			// Persist the committed version in the catalog so that post-CTAS reads within the same
+			// session can provide max_catalog_version to the snapshot builder without a UC log_tail.
+			if (parent_commit) {
+				auto *raw_committed = committed_txn.get();
+				auto committed_version = ffi::committed_transaction_version(&raw_committed);
+				delta_catalog.ccv2_committed_version.store(committed_version, std::memory_order_release);
 			}
 			// committed_txn goes out of scope here and frees the ExclusiveCommittedTransaction handle.
 			return;
@@ -638,13 +657,6 @@ void DeltaTransaction::InitializeForNewTable(ClientContext &context, const strin
 	}
 	D_ASSERT(mode == DeltaTransactionMode::REGULAR); // Must only be called once.
 
-	if (parent_commit) {
-		// CCv2 CTAS is deferred to a follow-up PR. Raise now so the user gets a clear message.
-		throw NotImplementedException(
-		    "CREATE TABLE AS SELECT with Unity Catalog managed commits (parent_commit=true) is not yet "
-		    "supported. Use a non-managed catalog for CTAS, or insert into the table in a separate step.");
-	}
-
 	auto &create_info = info.Base();
 
 	// Fast pre-validation: walk the column list and throw BinderException for any type
@@ -685,10 +697,77 @@ void DeltaTransaction::InitializeForNewTable(ClientContext &context, const strin
 		builder_res.Throw();
 	}
 
-	// Step 2: build the exclusive-create-transaction (default FileSystemCommitter path).
+	// Step 2: build the exclusive-create-transaction. CCv2 (parent_commit=true) takes the
+	// UC committer path so the kernel routes the staged commit through our
+	// CommitCallback --> commit_function; the default path uses FileSystemCommitter.
 	ffi::ExclusiveCreateTransaction *txn_raw = nullptr;
-	auto build_res = KernelUtils::TryUnpackResult(
-	    ffi::create_table_builder_build(builder.release(), ctas_extern_engine.get()), txn_raw);
+	ErrorData build_res;
+	if (parent_commit) {
+		// CCv2 tables require catalogManaged and vacuumProtocolCheck features in the Protocol,
+		// plus io.unitycatalog.tableId in the Metadata configuration so the UC committer can
+		// validate table identity. Add them via table properties before building the transaction.
+		// The builder handle is consumed and replaced by each call.
+		// inCommitTimestamp is auto-enabled by the kernel when catalogManaged is present.
+		const string catalog_managed_key = "delta.feature.catalogManaged";
+		const string catalog_managed_val = "supported";
+		const string vacuum_check_key = "delta.feature.vacuumProtocolCheck";
+		const string vacuum_check_val = "supported";
+		const string uc_table_id_key = "io.unitycatalog.tableId";
+		const string uc_table_id_val = unity_table_id.empty() ? ctas_table_path : unity_table_id;
+		ffi::ExclusiveCreateTableBuilder *builder_raw_prop = nullptr;
+		auto prop1_res =
+		    KernelUtils::TryUnpackResult(ffi::create_table_builder_with_table_property(
+		                                     builder.release(), KernelUtils::ToDeltaString(catalog_managed_key),
+		                                     KernelUtils::ToDeltaString(catalog_managed_val), ctas_extern_engine.get()),
+		                                 builder_raw_prop);
+		// builder is consumed regardless of success or error — always replace it.
+		builder = KernelExclusiveCreateTableBuilder(builder_raw_prop);
+		if (prop1_res.HasError()) {
+			prop1_res.Throw();
+		}
+		auto prop2_res =
+		    KernelUtils::TryUnpackResult(ffi::create_table_builder_with_table_property(
+		                                     builder.release(), KernelUtils::ToDeltaString(vacuum_check_key),
+		                                     KernelUtils::ToDeltaString(vacuum_check_val), ctas_extern_engine.get()),
+		                                 builder_raw_prop);
+		builder = KernelExclusiveCreateTableBuilder(builder_raw_prop);
+		if (prop2_res.HasError()) {
+			prop2_res.Throw();
+		}
+		auto prop3_res =
+		    KernelUtils::TryUnpackResult(ffi::create_table_builder_with_table_property(
+		                                     builder.release(), KernelUtils::ToDeltaString(uc_table_id_key),
+		                                     KernelUtils::ToDeltaString(uc_table_id_val), ctas_extern_engine.get()),
+		                                 builder_raw_prop);
+		builder = KernelExclusiveCreateTableBuilder(builder_raw_prop);
+		if (prop3_res.HasError()) {
+			prop3_res.Throw();
+		}
+
+		// Mirror the INSERT-side CCv2 wiring (delta_transaction.cpp InitializeTransaction):
+		// construct a UC commit client bound to this transaction's CommitCallback, then a
+		// MutableCommitter for the unity_table_id, then consume both handles in the build call.
+		auto commit_client = ffi::get_uc_commit_client(this, CommitCallback);
+		auto table_id = KernelUtils::ToDeltaString(unity_table_id.empty() ? ctas_table_path : unity_table_id);
+		ffi::MutableCommitter *committer_raw = nullptr;
+		auto committer_res = KernelUtils::TryUnpackResult(
+		    ffi::get_uc_committer(commit_client, table_id, DuckDBEngineError::AllocateError), committer_raw);
+		if (committer_res.HasError()) {
+			// The kernel did NOT consume commit_client on the error path. The INSERT-side CCv2
+			// code does not free it either (existing latent leak; see architecture plan OQ-4).
+			// Mirror that behavior here so both CCv2 code paths stay symmetric.
+			committer_res.Throw();
+		}
+		// create_table_builder_build_with_committer consumes BOTH the builder and committer
+		// unconditionally (success and error). Do not free either handle after this call.
+		build_res = KernelUtils::TryUnpackResult(
+		    ffi::create_table_builder_build_with_committer(
+		        builder.release(), ffi::Handle<ffi::MutableCommitter>(committer_raw), ctas_extern_engine.get()),
+		    txn_raw);
+	} else {
+		build_res = KernelUtils::TryUnpackResult(
+		    ffi::create_table_builder_build(builder.release(), ctas_extern_engine.get()), txn_raw);
+	}
 	kernel_create_txn = KernelExclusiveCreateTransaction(txn_raw);
 	if (build_res.HasError()) {
 		build_res.Throw();

@@ -1,0 +1,219 @@
+# name: test/sql/main/writing/ctas/ctas_partitioned.test
+# description: CTAS with PARTITIONED BY — covers single-column partition, multi-partition
+#              (multiple distinct values producing multiple files), multi-column partition,
+#              NULL partition value, empty CTAS with partitions, and missing column error.
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: Single-column partition with a single distinct value
+# Exactly 1 partition directory, 1 parquet file, 1 row from PhysicalCopyToFile.
+# The Sink assertion (chunk.size()==1) is satisfied.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/single_one' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 PARTITIONED BY (part) AS
+SELECT * FROM (VALUES (1, 'a'), (2, 'a')) v(id, part);
+
+query I
+SELECT count(*) FROM t1;
+----
+2
+
+query I
+SELECT count(*) FROM t1 WHERE part = 'a';
+----
+2
+
+statement ok
+DETACH t1;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/single_one' AS t1r (TYPE delta);
+
+query II rowsort
+SELECT id, part FROM t1r;
+----
+1	a
+2	a
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: Multi-partition CTAS — two distinct partition values → two parquet
+# files → Sink receives a chunk with multiple rows (one per file).
+# DeltaInsert::Sink now handles multi-row chunks correctly.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/multi_two' AS t2m (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2m.t2m PARTITIONED BY (part) AS
+SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'a')) v(id, part);
+
+query I
+SELECT count(*) FROM t2m;
+----
+3
+
+query I
+SELECT count(*) FROM t2m WHERE part = 'a';
+----
+2
+
+query I
+SELECT count(*) FROM t2m WHERE part = 'b';
+----
+1
+
+statement ok
+DETACH t2m;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/multi_two' AS t2mr (TYPE delta);
+
+query II rowsort
+SELECT id, part FROM t2mr;
+----
+1	a
+2	b
+3	a
+
+statement ok
+DETACH t2mr;
+
+# ---------------------------------------------------------------------------
+# Part 3: Multi-column partition CTAS — partitioned by (region, year).
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/multi_col' AS t3m (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3m.t3m PARTITIONED BY (region, year) AS
+SELECT * FROM (VALUES ('east', 2024, 10), ('west', 2024, 20), ('east', 2025, 30))
+v(region, year, sales);
+
+query I
+SELECT count(*) FROM t3m;
+----
+3
+
+query I
+SELECT sales FROM t3m WHERE region = 'east' AND year = 2024;
+----
+10
+
+statement ok
+DETACH t3m;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/multi_col' AS t3mr (TYPE delta);
+
+query III rowsort
+SELECT region, year, sales FROM t3mr;
+----
+east	2024	10
+east	2025	30
+west	2024	20
+
+statement ok
+DETACH t3mr;
+
+# ---------------------------------------------------------------------------
+# Part 4: NULL partition value — Delta uses empty string for NULL per spec.
+# The re-attached table must return the NULL row.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/null_part' AS t4n (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t4n.t4n PARTITIONED BY (part) AS
+SELECT * FROM (VALUES (1, 'a'), (2, NULL)) v(id, part);
+
+query I
+SELECT count(*) FROM t4n;
+----
+2
+
+query I
+SELECT count(*) FROM t4n WHERE part IS NULL;
+----
+1
+
+statement ok
+DETACH t4n;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/null_part' AS t4nr (TYPE delta);
+
+query I
+SELECT count(*) FROM t4nr WHERE part IS NULL;
+----
+1
+
+query II rowsort
+SELECT id, part FROM t4nr;
+----
+1	a
+2	NULL
+
+statement ok
+DETACH t4nr;
+
+# ---------------------------------------------------------------------------
+# Part 5: Empty CTAS with partitions — Protocol+Metadata commit, no Add actions.
+# No input rows → Sink never called → no multi-row chunk issue.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/empty_part' AS t5 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t5.t5 PARTITIONED BY (part) AS
+SELECT 1 AS id, 'x' AS part WHERE false;
+
+query I
+SELECT count(*) FROM t5;
+----
+0
+
+statement ok
+DETACH t5;
+
+# Re-attach must succeed (the metadata commit is there even with zero rows).
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/empty_part' AS t5r (TYPE delta);
+
+query I
+SELECT count(*) FROM t5r;
+----
+0
+
+statement ok
+DETACH t5r;
+
+# ---------------------------------------------------------------------------
+# Part 6: Partition column not in select list — must raise BinderException.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_part/err_missing' AS t6 (TYPE delta, allow_create true);
+
+statement error
+CREATE TABLE t6.t6 PARTITIONED BY (missing_col) AS
+SELECT 1 AS id, 'x' AS part;
+----
+Partition column 'missing_col' does not exist in the table schema
+
+statement ok
+DETACH t6;

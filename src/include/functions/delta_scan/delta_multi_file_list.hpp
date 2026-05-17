@@ -126,6 +126,10 @@ public: // TODO: clean up
 
 	mutable unique_ptr<DeltaLogPathArray> delta_log_path;
 
+	//! When set, passed to snapshot_builder_set_max_catalog_version before building the snapshot.
+	//! Required for catalogManaged (CCv2) Delta tables. DConstants::INVALID_INDEX when unset.
+	mutable idx_t max_catalog_version = DConstants::INVALID_INDEX;
+
 protected:
 	// Note: Nearly this entire class is mutable because it represents a lazily expanded list of files that is logically
 	//       const, but not physically.

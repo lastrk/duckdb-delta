@@ -743,6 +743,9 @@ void DeltaMultiFileList::InitializeSnapshot() const {
 		if (delta_log_path) {
 			TryUnpackKernelResult(ffi::snapshot_builder_set_log_tail(&builder, delta_log_path->GetFFIPtr()));
 		}
+		if (max_catalog_version != DConstants::INVALID_INDEX) {
+			ffi::snapshot_builder_set_max_catalog_version(&builder, NumericCast<ffi::Version>(max_catalog_version));
+		}
 		snapshot = make_shared_ptr<SharedKernelSnapshot>(TryUnpackKernelResult(ffi::snapshot_builder_build(builder)));
 
 		auto snapshot_ref = snapshot->GetLockingRef();

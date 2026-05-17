@@ -86,6 +86,9 @@ protected:
 private:
 	mutable mutex lock;
 
+	//! Back-reference to the owning catalog. Used to propagate committed version after CTAS.
+	DeltaCatalog &delta_catalog;
+
 	//! Cached table entry (without a specified version)
 	//! Note: this should be the latest version of the table, pinned at the version of first reading it during this
 	//! transaction

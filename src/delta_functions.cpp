@@ -15,6 +15,10 @@ vector<TableFunctionSet> DeltaFunctions::GetTableFunctions(ExtensionLoader &load
 		functions.push_back(TableFunctionSet(fun));
 	}
 
+#ifdef DEBUG
+	functions.push_back(TableFunctionSet(GetCcV2TestCommitterFunction()));
+#endif
+
 	return functions;
 }
 

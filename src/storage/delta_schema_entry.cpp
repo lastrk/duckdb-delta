@@ -170,6 +170,19 @@ unique_ptr<DeltaTableEntry> DeltaSchemaEntry::CreateTableEntry(ClientContext &co
 		snapshot->delta_log_path = make_uniq<DeltaLogPathArray>(delta_catalog.catalog_log_tail);
 	}
 
+	// Set max_catalog_version for CCv2 tables.
+	// An explicit ATTACH option takes highest priority (supports both CCv2 and plain re-attach
+	// to catalogManaged tables). For CCv2 catalogs (parent_commit=true) without an explicit
+	// option, fall back to the version stored after a CTAS commit in this session.
+	if (delta_catalog.max_catalog_version != DConstants::INVALID_INDEX) {
+		snapshot->max_catalog_version = delta_catalog.max_catalog_version;
+	} else if (delta_catalog.parent_commit) {
+		auto committed = delta_catalog.ccv2_committed_version.load(std::memory_order_acquire);
+		if (committed != DConstants::INVALID_INDEX) {
+			snapshot->max_catalog_version = committed;
+		}
+	}
+
 	// Get the names and types from the delta snapshot
 	vector<LogicalType> return_types;
 	vector<string> names;

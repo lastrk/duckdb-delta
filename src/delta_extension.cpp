@@ -60,18 +60,35 @@ static unique_ptr<Catalog> DeltaCatalogAttach(optional_ptr<StorageExtensionInfo>
 		if (StringUtil::Lower(option.first) == "allow_create") {
 			res->allow_create = option.second.GetValue<bool>();
 		}
+		if (StringUtil::Lower(option.first) == "parent_commit_function_name") {
+			res->parent_commit_function_name = StringValue::Get(option.second);
+		}
+		if (StringUtil::Lower(option.first) == "max_catalog_version") {
+			res->max_catalog_version = UBigIntValue::Get(option.second.DefaultCastAs(LogicalType::UBIGINT));
+		}
 	}
 
 	// If parent_commit is enabled, we need to load the internal commit function of the parent catalog here
 	if (res->parent_commit) {
 		string schema = DEFAULT_SCHEMA;
-		string commit_fun_name = "__internal_delta_ccv2_commit_staged";
+		string commit_fun_name = res->parent_commit_function_name.empty()
+		                             ? string("__internal_delta_ccv2_commit_staged")
+		                             : res->parent_commit_function_name;
 
 		CatalogEntryRetriever retriever(context);
 		EntryLookupInfo lookup_info(CatalogType::TABLE_FUNCTION_ENTRY, commit_fun_name);
-		auto fun = retriever.GetEntry(res->parent_catalog_name, schema, lookup_info, OnEntryNotFound::RETURN_NULL);
+		// Search the parent catalog first (production path: function registered by Unity Catalog extension).
+		optional_ptr<CatalogEntry> fun =
+		    retriever.GetEntry(res->parent_catalog_name, schema, lookup_info, OnEntryNotFound::RETURN_NULL);
+		if (!fun && !res->parent_commit_function_name.empty()) {
+			// Non-default function name: allow system-catalog fallback for test fixtures.
+			fun = retriever.GetEntry(SYSTEM_CATALOG, schema, lookup_info, OnEntryNotFound::RETURN_NULL);
+		}
 		if (!fun) {
-			throw InternalException("Parent catalog does not have a __internal_delta_ccv2_commit_staged function");
+			throw InvalidInputException(
+			    "Cannot find commit function '%s' in catalog '%s' or the system catalog. "
+			    "Ensure the Unity Catalog extension is loaded before attaching a CCv2 Delta table.",
+			    commit_fun_name, res->parent_catalog_name);
 		}
 		res->commit_function = fun->Cast<TableFunctionCatalogEntry>();
 	}

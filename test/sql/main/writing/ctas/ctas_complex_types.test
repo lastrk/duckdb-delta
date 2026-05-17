@@ -1,0 +1,404 @@
+# name: test/sql/main/writing/ctas/ctas_complex_types.test
+# description: CTAS with LIST, MAP, nested complex types, BLOB, ENUM, and TIMESTAMP_TZ.
+#              Tests LIST, MAP, STRUCT-with-LIST, and MAP-with-STRUCT — all complex types
+#              are supported because AddWrittenFiles skips stats for LIST, MAP, VARIANT, and
+#              any STRUCT that transitively contains a LIST or MAP child.
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: LIST of INTEGER
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/list_int' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 AS
+SELECT [1, 2, 3] AS xs;
+
+query I
+SELECT count(*) FROM t1;
+----
+1
+
+query I
+SELECT xs[1] FROM t1;
+----
+1
+
+query I
+SELECT xs[3] FROM t1;
+----
+3
+
+statement ok
+DETACH t1;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/list_int' AS t1r (TYPE delta);
+
+query I
+SELECT xs[1] FROM t1r;
+----
+1
+
+query I
+SELECT xs[3] FROM t1r;
+----
+3
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: LIST of INTEGER with a NULL element
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/list_int_null' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 AS
+SELECT [1, NULL, 3] AS xs;
+
+query I
+SELECT xs[2] IS NULL FROM t2;
+----
+true
+
+query I
+SELECT xs[3] FROM t2;
+----
+3
+
+statement ok
+DETACH t2;
+
+# ---------------------------------------------------------------------------
+# Part 3: LIST of VARCHAR
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/list_varchar' AS t3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3.t3 AS
+SELECT ['a', 'b', 'c'] AS tags;
+
+query I
+SELECT count(*) FROM t3;
+----
+1
+
+query I
+SELECT tags[1] FROM t3;
+----
+a
+
+statement ok
+DETACH t3;
+
+# ---------------------------------------------------------------------------
+# Part 4: MAP varchar to integer
+# AddWrittenFiles now skips MAP columns during stats parsing (same as LIST),
+# so CTAS with a MAP column succeeds and round-trips correctly.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/map_varchar_int' AS t4 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t4.t4 AS
+SELECT MAP {'a': 1, 'b': 2} AS counts;
+
+query I
+SELECT count(*) FROM t4;
+----
+1
+
+query I
+SELECT counts['a'] FROM t4;
+----
+1
+
+query I
+SELECT counts['b'] FROM t4;
+----
+2
+
+statement ok
+DETACH t4;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/map_varchar_int' AS t4r (TYPE delta);
+
+query I
+SELECT counts['a'] FROM t4r;
+----
+1
+
+statement ok
+DETACH t4r;
+
+# ---------------------------------------------------------------------------
+# Part 5: LIST of STRUCT
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/list_of_struct' AS t5 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t5.t5 AS
+SELECT [{'k': 1}, {'k': 2}] AS items;
+
+query I
+SELECT count(*) FROM t5;
+----
+1
+
+query I
+SELECT items[1]['k'] FROM t5;
+----
+1
+
+query I
+SELECT items[2]['k'] FROM t5;
+----
+2
+
+statement ok
+DETACH t5;
+
+# ---------------------------------------------------------------------------
+# Part 6: STRUCT containing LIST
+# AddWrittenFiles now skips STRUCT columns that transitively contain a LIST
+# child, so CTAS with a STRUCT(tags LIST) column succeeds and round-trips.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/struct_with_list' AS t6 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t6.t6 AS
+SELECT {'tags': ['x', 'y']} AS payload;
+
+query I
+SELECT count(*) FROM t6;
+----
+1
+
+query I
+SELECT payload['tags'][1] FROM t6;
+----
+x
+
+query I
+SELECT payload['tags'][2] FROM t6;
+----
+y
+
+statement ok
+DETACH t6;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/struct_with_list' AS t6r (TYPE delta);
+
+query I
+SELECT payload['tags'][1] FROM t6r;
+----
+x
+
+statement ok
+DETACH t6r;
+
+# ---------------------------------------------------------------------------
+# Part 7: MAP varchar to STRUCT
+# AddWrittenFiles skips MAP columns (and MAP-with-STRUCT is also a MAP), so
+# CTAS with a MAP(VARCHAR, STRUCT) column succeeds and round-trips correctly.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/map_to_struct' AS t7 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t7.t7 AS
+SELECT MAP {'k': {'n': 1, 's': 'one'}} AS lookup;
+
+query I
+SELECT count(*) FROM t7;
+----
+1
+
+query I
+SELECT lookup['k']['n'] FROM t7;
+----
+1
+
+query I
+SELECT lookup['k']['s'] FROM t7;
+----
+one
+
+statement ok
+DETACH t7;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/map_to_struct' AS t7r (TYPE delta);
+
+query I
+SELECT lookup['k']['n'] FROM t7r;
+----
+1
+
+statement ok
+DETACH t7r;
+
+# ---------------------------------------------------------------------------
+# Part 8: Empty LIST
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/empty_list' AS t8 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t8.t8 AS
+SELECT CAST([] AS INTEGER[]) AS xs;
+
+query I
+SELECT count(*) FROM t8;
+----
+1
+
+query I
+SELECT len(xs) FROM t8;
+----
+0
+
+statement ok
+DETACH t8;
+
+# ---------------------------------------------------------------------------
+# Part 9: Empty MAP
+# An empty MAP produces no stats rows, so the cast bug does not trigger.
+# Verify that an empty MAP CTAS succeeds and round-trips correctly.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/empty_map' AS t9 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t9.t9 AS
+SELECT CAST(MAP {} AS MAP(VARCHAR, INTEGER)) AS m;
+
+query I
+SELECT count(*) FROM t9;
+----
+1
+
+query I
+SELECT cardinality(m) FROM t9;
+----
+0
+
+statement ok
+DETACH t9;
+
+# ---------------------------------------------------------------------------
+# Part 10: BLOB column
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/blob_col' AS t10 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t10.t10 AS
+SELECT CAST('hello' AS BLOB) AS data;
+
+query I
+SELECT count(*) FROM t10;
+----
+1
+
+query I
+SELECT data = 'hello'::BLOB FROM t10;
+----
+true
+
+statement ok
+DETACH t10;
+
+# Round-trip via re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/blob_col' AS t10r (TYPE delta);
+
+query I
+SELECT data = 'hello'::BLOB FROM t10r;
+----
+true
+
+statement ok
+DETACH t10r;
+
+# ---------------------------------------------------------------------------
+# Part 11: ENUM column — Delta has no ENUM concept; maps to string.
+#          After re-attach the column reads back as VARCHAR.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral');
+
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/enum_col' AS t11 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t11.t11 AS
+SELECT CAST('happy' AS mood) AS mood_val;
+
+query I
+SELECT count(*) FROM t11;
+----
+1
+
+statement ok
+DETACH t11;
+
+# After re-attach the value is VARCHAR (Delta string).
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/enum_col' AS t11r (TYPE delta);
+
+query I
+SELECT mood_val FROM t11r;
+----
+happy
+
+statement ok
+DETACH t11r;
+
+# ---------------------------------------------------------------------------
+# Part 12: TIMESTAMP_TZ column
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/timestamptz_col' AS t12 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t12.t12 AS
+SELECT TIMESTAMPTZ '2024-03-15 10:30:00+00' AS ts;
+
+query I
+SELECT count(*) FROM t12;
+----
+1
+
+statement ok
+DETACH t12;
+
+# Round-trip: the UTC timestamp value must survive re-attach.
+statement ok
+ATTACH '__TEST_DIR__/ctas_complex/timestamptz_col' AS t12r (TYPE delta);
+
+query I
+SELECT ts::VARCHAR LIKE '2024-03-15%' FROM t12r;
+----
+true
+
+statement ok
+DETACH t12r;

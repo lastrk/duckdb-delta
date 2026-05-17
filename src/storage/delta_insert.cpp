@@ -103,6 +103,11 @@ unique_ptr<GlobalSinkState> DeltaInsert::GetGlobalSinkState(ClientContext &conte
 	//! CREATING_TABLE mode. The kernel writes the version-0 commit on transaction commit.
 	delta_transaction.InitializeForNewTable(context, delta_path, *info);
 
+	//! CCv2 CTAS: parent_table_entry intentionally remains nullptr (the default). No parent-catalog
+	//! TableCatalogEntry exists yet — the version-0 staged commit IS the table-creation event. The
+	//! parent commit function receives a null table_entry_pointer and must infer table identity
+	//! from staged_commit_path. See DeltaTransaction::CommitCallback for the version-based guard.
+
 	return make_uniq<DeltaInsertGlobalState>(*info);
 }
 
@@ -187,6 +192,22 @@ static DeltaColumnStats ParseColumnStats(const vector<Value> col_stats) {
 	return column_stats;
 }
 
+static bool HasNonStatsType(const LogicalType &type) {
+	// LIST, MAP and VARIANT do not have collectable min/max/null_count stats.
+	if (type.id() == LogicalTypeId::LIST || type.id() == LogicalTypeId::MAP || type.id() == LogicalTypeId::VARIANT) {
+		return true;
+	}
+	// A STRUCT that contains any non-stats child also cannot be fully represented.
+	if (type.id() == LogicalTypeId::STRUCT) {
+		for (const auto &child : StructType::GetChildTypes(type)) {
+			if (HasNonStatsType(child.second)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chunk) {
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		DeltaDataFile data_file;
@@ -241,8 +262,11 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 				}
 			}
 
-			// Skip types whose stats we don't yet support
-			if (coltype.id() == LogicalTypeId::VARIANT || coltype.id() == LogicalTypeId::LIST) {
+			// Skip types whose stats we don't yet support: LIST, MAP, VARIANT, and any STRUCT
+			// that transitively contains a LIST or MAP child (e.g. STRUCT(tags LIST(VARCHAR))).
+			// The stats-value builder in delta_transaction.cpp cannot produce valid min/max/null_count
+			// values for these types, so we omit them from column stats rather than failing.
+			if (HasNonStatsType(coltype)) {
 				continue;
 			}
 
@@ -274,14 +298,10 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 
 SinkResultType DeltaInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &global_state = input.global_state.Cast<DeltaInsertGlobalState>();
-
-	if (chunk.size() != 1) {
-		throw InternalException(
-		    "DeltaInsert::Sink expects a single row containing output of the PhysicalCopy that should be its Source");
-	}
-
+	// PhysicalCopyToFile emits one row per written file (one row for non-partitioned writes,
+	// one row per distinct partition value for partition_output mode). AddWrittenFiles loops
+	// over all rows so no per-chunk cardinality restriction is required here.
 	AddWrittenFiles(global_state, chunk);
-
 	return SinkResultType::NEED_MORE_INPUT;
 }
 

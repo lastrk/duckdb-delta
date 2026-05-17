@@ -54,5 +54,13 @@ private:
 	static ScalarFunctionSet GetWriteFileFunction(ExtensionLoader &loader);
 
 	static vector<TableFunction> GetTransactionIdempotencyHelpers(DatabaseInstance &instance);
+
+#ifdef DEBUG
+	//! Test-only CCv2 commit promoter (registered under
+	//! "__internal_delta_test_ccv2_commit_staged"). Used by sqllogic tests
+	//! that exercise CCv2 CTAS / INSERT without a real Unity Catalog server.
+	//! Only compiled and registered in debug builds to prevent exposure in production.
+	static TableFunction GetCcV2TestCommitterFunction();
+#endif
 };
 } // namespace duckdb

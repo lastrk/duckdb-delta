@@ -26,6 +26,7 @@ set(EXTENSION_SOURCES
     src/functions/expression_functions.cpp
     src/functions/util_functions.cpp
     src/functions/delta_transaction_utils/idempotency_helpers.cpp
+    src/functions/delta_transaction_utils/ccv2_test_committer.cpp
     src/path_utils.cpp
     src/storage/delta_insert.cpp
     src/storage/delta_catalog.cpp

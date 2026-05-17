@@ -14,6 +14,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
 
+#include <atomic>
+
 namespace duckdb {
 class DeltaSchemaEntry;
 
@@ -45,9 +47,24 @@ public:
 	bool parent_commit = false;
 	optional_ptr<TableFunctionCatalogEntry> commit_function;
 	string unity_table_id;
+	//! Name of the commit-staged table function to look up in the parent catalog.
+	//! Defaults to "__internal_delta_ccv2_commit_staged" when empty.
+	//! Set to "__internal_delta_test_ccv2_commit_staged" in tests to avoid
+	//! colliding with the production Unity Catalog extension's function.
+	string parent_commit_function_name;
 
 	// Store the log_tail for catalog-managed commits (CCV2)
 	Value catalog_log_tail;
+
+	//! After a successful CCv2 CTAS, stores the committed version (always 0 for table creation).
+	//! Used by CreateTableEntry to set max_catalog_version on snapshot reads within the same
+	//! session when no log_tail is available from a UC client. DConstants::INVALID_INDEX when unset.
+	std::atomic<idx_t> ccv2_committed_version {DConstants::INVALID_INDEX};
+
+	//! Explicit max_catalog_version for CCv2 tables set via ATTACH option.
+	//! When set, overrides ccv2_committed_version for snapshot builds.
+	//! DConstants::INVALID_INDEX when unset.
+	idx_t max_catalog_version = DConstants::INVALID_INDEX;
 
 	//! When true, CTAS is allowed to create a new Delta table at this catalog path.
 	//! When false (the default), the path must already contain a valid Delta table on ATTACH.
