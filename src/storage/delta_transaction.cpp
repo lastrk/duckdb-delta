@@ -581,9 +581,12 @@ void DeltaTransaction::InitializeTransaction(ClientContext &context) {
 		auto snapshot_ref = table_entry->snapshot->snapshot->GetLockingRef();
 
 		if (parent_commit) {
+			// ATTACH-time validation in DeltaCatalogAttach guarantees unity_table_id is non-empty
+			// when parent_commit is true. A violation here is a programmer error, not user input.
+			D_ASSERT(!unity_table_id.empty());
 			// Create UC commit client with callbacks, passing `this` as the context
 			auto commit_client = ffi::get_uc_commit_client(this, CommitCallback);
-			auto table_id = KernelUtils::ToDeltaString(unity_table_id.empty() ? path : unity_table_id);
+			auto table_id = KernelUtils::ToDeltaString(unity_table_id);
 			auto uc_committer = table_entry->snapshot->TryUnpackKernelResult(
 			    ffi::get_uc_committer(commit_client, table_id, DuckDBEngineError::AllocateError));
 			new_kernel_transaction = table_entry->snapshot->TryUnpackKernelResult(ffi::transaction_with_committer(
@@ -703,6 +706,9 @@ void DeltaTransaction::InitializeForNewTable(ClientContext &context, const strin
 	ffi::ExclusiveCreateTransaction *txn_raw = nullptr;
 	ErrorData build_res;
 	if (parent_commit) {
+		// ATTACH-time validation in DeltaCatalogAttach guarantees unity_table_id is non-empty
+		// when parent_commit is true. A violation here is a programmer error, not user input.
+		D_ASSERT(!unity_table_id.empty());
 		// CCv2 tables require catalogManaged and vacuumProtocolCheck features in the Protocol,
 		// plus io.unitycatalog.tableId in the Metadata configuration so the UC committer can
 		// validate table identity. Add them via table properties before building the transaction.
@@ -713,7 +719,7 @@ void DeltaTransaction::InitializeForNewTable(ClientContext &context, const strin
 		const string vacuum_check_key = "delta.feature.vacuumProtocolCheck";
 		const string vacuum_check_val = "supported";
 		const string uc_table_id_key = "io.unitycatalog.tableId";
-		const string uc_table_id_val = unity_table_id.empty() ? ctas_table_path : unity_table_id;
+		const string uc_table_id_val = unity_table_id;
 		ffi::ExclusiveCreateTableBuilder *builder_raw_prop = nullptr;
 		auto prop1_res =
 		    KernelUtils::TryUnpackResult(ffi::create_table_builder_with_table_property(
@@ -748,7 +754,7 @@ void DeltaTransaction::InitializeForNewTable(ClientContext &context, const strin
 		// construct a UC commit client bound to this transaction's CommitCallback, then a
 		// MutableCommitter for the unity_table_id, then consume both handles in the build call.
 		auto commit_client = ffi::get_uc_commit_client(this, CommitCallback);
-		auto table_id = KernelUtils::ToDeltaString(unity_table_id.empty() ? ctas_table_path : unity_table_id);
+		auto table_id = KernelUtils::ToDeltaString(unity_table_id);
 		ffi::MutableCommitter *committer_raw = nullptr;
 		auto committer_res = KernelUtils::TryUnpackResult(
 		    ffi::get_uc_committer(commit_client, table_id, DuckDBEngineError::AllocateError), committer_raw);

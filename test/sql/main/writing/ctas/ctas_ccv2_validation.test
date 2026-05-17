@@ -1,0 +1,48 @@
+# name: test/sql/main/writing/ctas/ctas_ccv2_validation.test
+# description: Negative tests: ATTACH-time validation rejects CCv2 mode
+#              (parent_commit=true or unity_catalog=true) when unity_table_id
+#              is absent or empty. The validator fires before any commit-function
+#              lookup, so no parent catalog setup is needed.
+# group: [ctas]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Case 1: parent_commit true with no unity_table_id -- must raise an error.
+# ---------------------------------------------------------------------------
+statement error
+ATTACH '__TEST_DIR__/ccv2/val_t1' AS val_t1 (TYPE delta, allow_create true,
+                                              parent_commit true,
+                                              parent_catalog 'noparent',
+                                              parent_commit_function_name '__internal_delta_test_ccv2_commit_staged');
+----
+unity_table_id is required
+
+# ---------------------------------------------------------------------------
+# Case 2: parent_commit true with an explicitly empty unity_table_id -- must
+#         raise the same error (empty string is rejected, not silently used).
+# ---------------------------------------------------------------------------
+statement error
+ATTACH '__TEST_DIR__/ccv2/val_t2' AS val_t2 (TYPE delta, allow_create true,
+                                              parent_commit true,
+                                              parent_catalog 'noparent',
+                                              parent_commit_function_name '__internal_delta_test_ccv2_commit_staged',
+                                              unity_table_id '');
+----
+unity_table_id is required
+
+# ---------------------------------------------------------------------------
+# Case 3: unity_catalog true (the preferred alias) with no unity_table_id --
+#         must raise the same error, proving the alias triggers the validator.
+# ---------------------------------------------------------------------------
+statement error
+ATTACH '__TEST_DIR__/ccv2/val_t3' AS val_t3 (TYPE delta, allow_create true,
+                                              unity_catalog true,
+                                              parent_catalog 'noparent',
+                                              parent_commit_function_name '__internal_delta_test_ccv2_commit_staged');
+----
+unity_table_id is required

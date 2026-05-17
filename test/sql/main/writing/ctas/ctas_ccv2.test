@@ -82,7 +82,7 @@ ATTACH ':memory:' AS parent2;
 
 statement ok
 ATTACH '__TEST_DIR__/ccv2/t2_empty' AS t2 (TYPE delta, allow_create true,
-                                            parent_commit true,
+                                            unity_catalog true,
                                             parent_catalog 'parent2',
                                             parent_commit_function_name '__internal_delta_test_ccv2_commit_staged',
                                             unity_table_id 'test-table-id-2');

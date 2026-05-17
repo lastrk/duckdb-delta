@@ -44,6 +44,9 @@ public:
 	bool child_catalog_mode = false;
 	string parent_catalog_name;
 	optional_ptr<TableCatalogEntry> parent_table_entry;
+	//! Internal gate for Unity Catalog CCv2 commit mode. Set by either the user-facing
+	//! unity_catalog=true ATTACH option (preferred) or the legacy alias parent_commit=true.
+	//! When true, unity_table_id must be non-empty (enforced at ATTACH time).
 	bool parent_commit = false;
 	optional_ptr<TableFunctionCatalogEntry> commit_function;
 	string unity_table_id;

@@ -24,6 +24,7 @@ static unique_ptr<Catalog> DeltaCatalogAttach(optional_ptr<StorageExtensionInfo>
 	auto res = make_uniq<DeltaCatalog>(db, info.path, options.access_mode);
 	res->internal_table_name = name;
 
+	bool legacy_parent_commit_used = false;
 	for (const auto &option : info.options) {
 		if (StringUtil::Lower(option.first) == "pin_snapshot") {
 			res->use_cache = option.second.GetValue<bool>();
@@ -49,7 +50,15 @@ static unique_ptr<Catalog> DeltaCatalogAttach(optional_ptr<StorageExtensionInfo>
 			res->parent_catalog_name = StringValue::Get(option.second);
 		}
 		if (StringUtil::Lower(option.first) == "parent_commit") {
-			res->parent_commit = option.second.GetValue<bool>();
+			if (option.second.GetValue<bool>()) {
+				res->parent_commit = true;
+				legacy_parent_commit_used = true;
+			}
+		}
+		if (StringUtil::Lower(option.first) == "unity_catalog") {
+			if (option.second.GetValue<bool>()) {
+				res->parent_commit = true;
+			}
 		}
 		if (StringUtil::Lower(option.first) == "log_tail") {
 			res->catalog_log_tail = option.second;
@@ -66,6 +75,20 @@ static unique_ptr<Catalog> DeltaCatalogAttach(optional_ptr<StorageExtensionInfo>
 		if (StringUtil::Lower(option.first) == "max_catalog_version") {
 			res->max_catalog_version = UBigIntValue::Get(option.second.DefaultCastAs(LogicalType::UBIGINT));
 		}
+	}
+
+	if (legacy_parent_commit_used) {
+		DUCKDB_LOG_INTERNAL(context, "delta.Attach", LogLevel::LOG_INFO,
+		                    "parent_commit is deprecated; prefer unity_catalog true");
+	}
+
+	if (res->parent_commit && res->unity_table_id.empty()) {
+		throw InvalidInputException(
+		    "unity_table_id is required when unity_catalog=true (or the alias parent_commit=true). "
+		    "The Unity Catalog committer rejects commits whose io.unitycatalog.tableId does not match the "
+		    "registered table's id. Pass the table's UUID, e.g. "
+		    "unity_table_id '01234567-89ab-cdef-0123-456789abcdef'. You can retrieve it from Unity Catalog "
+		    "with DESCRIBE TABLE EXTENDED or the GET /tables REST API.");
 	}
 
 	// If parent_commit is enabled, we need to load the internal commit function of the parent catalog here
