@@ -1,0 +1,230 @@
+# name: test/sql/main/writing/idempotent_writes.test
+# description: Idempotent transactional writes via delta_set_transaction_version / delta_get_transaction_version (inlined data, no GENERATED_DATA gate)
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# -----------------------------------------------------------------------------
+# setup
+#
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '__TEST_DIR__/main/writing/idempotent_writes');
+
+statement ok
+ATTACH '__TEST_DIR__/main/writing/idempotent_writes/delta_lake' AS t (TYPE delta);
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+# convenience views to read app-id versions back
+statement ok
+CREATE VIEW v_app_a AS SELECT version FROM delta_get_transaction_version('t', 'app_a');
+
+statement ok
+CREATE VIEW v_app_b AS SELECT version FROM delta_get_transaction_version('t', 'app_b');
+
+statement ok
+CREATE VIEW v_unknown AS SELECT version FROM delta_get_transaction_version('t', 'never_set');
+
+# -----------------------------------------------------------------------------
+# test: get_transaction_version for a never-set app_id returns NULL
+#
+
+query I
+FROM v_app_a;
+----
+NULL
+
+query I
+FROM v_unknown;
+----
+NULL
+
+# -----------------------------------------------------------------------------
+# test: first commit for app_a sets its version to 1
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CALL delta_set_transaction_version('t', 'app_a', 1::UBIGINT, NULL::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (100);
+
+statement ok
+COMMIT
+
+query I
+FROM v_app_a;
+----
+1
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+11	145
+
+# -----------------------------------------------------------------------------
+# test: app_b is independent of app_a
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CALL delta_set_transaction_version('t', 'app_b', 1::UBIGINT, NULL::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (200);
+
+statement ok
+COMMIT
+
+query I
+FROM v_app_a;
+----
+1
+
+query I
+FROM v_app_b;
+----
+1
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	345
+
+# -----------------------------------------------------------------------------
+# test: stale expected_previous_version fails the commit; row count unchanged
+#
+
+statement ok
+BEGIN TRANSACTION
+
+# app_a is at 1; pretend the caller thinks it's still at 4
+statement ok
+CALL delta_set_transaction_version('t', 'app_a', 5::UBIGINT, 4::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (300);
+
+statement error
+COMMIT
+----
+TransactionContext Error: Failed to commit: DeltaTransaction version for app_id 'app_a' did not match the expected previous version of '4' (found: '1')
+
+# app_a unchanged, row not added
+query I
+FROM v_app_a;
+----
+1
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	345
+
+# -----------------------------------------------------------------------------
+# test: ABORT keeps the previous version intact (mirrors generated test, with ABORT instead of ROLLBACK)
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CALL delta_set_transaction_version('t', 'app_a', 2::UBIGINT, 1::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (400);
+
+statement ok
+ABORT
+
+# app_a stays at 1, row not added
+query I
+FROM v_app_a;
+----
+1
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	345
+
+# -----------------------------------------------------------------------------
+# test: multiple set_transaction_version calls for the SAME app_id in one txn — first call wins
+# (DeltaTransaction stores app_versions in an unordered_map and uses .insert(), which is a no-op
+#  on key collision; this pins that behavior so a future switch to insert_or_assign is caught.)
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CALL delta_set_transaction_version('t', 'app_a', 2::UBIGINT, 1::UBIGINT);
+
+# Second call for the same app_id is silently dropped (first-wins).
+statement ok
+CALL delta_set_transaction_version('t', 'app_a', 99::UBIGINT, 1::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (500);
+
+statement ok
+COMMIT
+
+# version is 2 (from the first call), not 99
+query I
+FROM v_app_a;
+----
+2
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+13	845
+
+# -----------------------------------------------------------------------------
+# test: set_transaction_version followed by INSERT without an explicit BEGIN
+# (single-statement auto-commit txn still records the app version)
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+CALL delta_set_transaction_version('t', 'app_b', 2::UBIGINT, 1::UBIGINT);
+
+statement ok
+INSERT INTO t VALUES (600);
+
+statement ok
+COMMIT
+
+query I
+FROM v_app_a;
+----
+2
+
+query I
+FROM v_app_b;
+----
+2
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+14	1445
+
+statement ok
+DETACH t;

@@ -1,0 +1,202 @@
+# name: test/sql/main/writing/transaction_edge_cases.test
+# description: Transaction edge cases beyond the basic BEGIN/COMMIT/ROLLBACK flow
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# -----------------------------------------------------------------------------
+# setup
+#
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '__TEST_DIR__/main/writing/transaction_edge_cases');
+
+statement ok
+ATTACH '__TEST_DIR__/main/writing/transaction_edge_cases/delta_lake' AS t (TYPE delta);
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/transaction_edge_cases/delta_lake/**/*.parquet')
+----
+1
+
+# -----------------------------------------------------------------------------
+# test: ABORT keyword behaves like ROLLBACK
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t VALUES (100);
+
+statement ok
+INSERT INTO t VALUES (101);
+
+# files staged on disk during the open transaction
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/transaction_edge_cases/delta_lake/**/*.parquet')
+----
+3
+
+statement ok
+ABORT
+
+# no rows added, staged files cleaned up
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/transaction_edge_cases/delta_lake/**/*.parquet')
+----
+1
+
+# -----------------------------------------------------------------------------
+# test: in-transaction SELECT against a table with staged INSERTs is rejected
+#
+# Once an INSERT has staged files into DeltaTransaction::outstanding_appends,
+# any SELECT against the same table within the same txn is explicitly refused
+# by the delta catalog with a "Scanning a table with uncommitted writes is not
+# supported" error. This pins that behavior so a future change (e.g. surfacing
+# staged appends into the scan) is caught.
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t VALUES (777);
+
+statement error
+SELECT count(*), sum(i) FROM t;
+----
+Scanning a table with uncommitted writes is not supported
+
+statement ok
+INSERT INTO t VALUES (778);
+
+# Same error after a second staged insert.
+statement error
+SELECT count(*), sum(i) FROM t;
+----
+Scanning a table with uncommitted writes is not supported
+
+statement ok
+COMMIT
+
+# After commit, both rows are visible.
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	1600
+
+# -----------------------------------------------------------------------------
+# test: nested BEGIN inside an open transaction is rejected; outer txn must be rolled back
+#
+# DuckDB rejects nested BEGIN (exact wording is version-dependent) and the
+# error puts the outer transaction into an aborted state — a subsequent COMMIT
+# is treated as ROLLBACK. So the only safe way out is an explicit ROLLBACK.
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement error
+BEGIN TRANSACTION
+----
+
+statement ok
+ROLLBACK
+
+# No rows added.
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	1600
+
+# -----------------------------------------------------------------------------
+# test: ROLLBACK after a failed statement does not leak files
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t VALUES (1234);
+
+# A bad insert errors; ROLLBACK after is always valid regardless of whether the
+# failed statement put the txn into an aborted state.
+statement error
+INSERT INTO t VALUES ('not a number');
+----
+
+statement ok
+ROLLBACK
+
+# Neither row landed and no parquet files leaked.
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	1600
+
+# -----------------------------------------------------------------------------
+# test: BEGIN/ROLLBACK with only failing statements is a clean no-op
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement error
+INSERT INTO t VALUES (1, 2);
+----
+
+statement ok
+ROLLBACK
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	1600
+
+# -----------------------------------------------------------------------------
+# test: cross-statement file accounting -- 3 INSERTs in one txn produce 3 parquet files
+#
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t VALUES (501);
+
+statement ok
+INSERT INTO t VALUES (502);
+
+statement ok
+INSERT INTO t VALUES (503);
+
+statement ok
+COMMIT
+
+# 1 v0 file + 2 (777/778) + 3 (501/502/503) = 6
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/transaction_edge_cases/delta_lake/**/*.parquet')
+----
+6
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+15	3106
+
+statement ok
+DETACH t;
