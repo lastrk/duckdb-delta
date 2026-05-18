@@ -1,9 +1,10 @@
 # name: test/sql/main/writing/ctas/ctas_ccv2_validation.test
 # description: Negative tests: ATTACH-time validation rejects CCv2 mode
+# group: [ctas]
+
 #              (parent_commit=true or unity_catalog=true) when unity_table_id
 #              is absent or empty. The validator fires before any commit-function
 #              lookup, so no parent catalog setup is needed.
-# group: [ctas]
 
 require parquet
 

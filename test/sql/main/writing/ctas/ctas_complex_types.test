@@ -1,9 +1,10 @@
 # name: test/sql/main/writing/ctas/ctas_complex_types.test
 # description: CTAS with LIST, MAP, nested complex types, BLOB, ENUM, and TIMESTAMP_TZ.
+# group: [ctas]
+
 #              Tests LIST, MAP, STRUCT-with-LIST, and MAP-with-STRUCT — all complex types
 #              are supported because AddWrittenFiles skips stats for LIST, MAP, VARIANT, and
 #              any STRUCT that transitively contains a LIST or MAP child.
-# group: [ctas]
 
 require parquet
 

@@ -1,10 +1,11 @@
 # name: test/sql/main/writing/ctas/ctas_timestamp_ntz.test
 # description: Verify CTAS with timestamp_ntz types (TIMESTAMP_MS, TIMESTAMP_SEC).
+# group: [ctas]
+
 #              TIMESTAMP_NS is rejected at bind time because Delta timestamp_ntz stores
 #              microsecond precision and nanosecond sub-precision would be silently lost.
 #              TIMESTAMP_MS and TIMESTAMP_SEC are lossless (their precision fits within
 #              microsecond storage) and are accepted; values are verified on round-trip.
-# group: [ctas]
 
 require parquet
 

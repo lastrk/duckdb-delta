@@ -1,7 +1,8 @@
 # name: test/sql/main/writing/ctas/ctas_kernel_native.test
 # description: Verify kernel-emitted commit shape for CTAS (engineInfo, operation, protocol,
-#              metaData, schemaString) and exercise nested type visitor paths (STRUCT, DECIMAL).
 # group: [ctas]
+
+#              metaData, schemaString) and exercise nested type visitor paths (STRUCT, DECIMAL).
 
 require parquet
 
