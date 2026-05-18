@@ -1,0 +1,75 @@
+# name: test/sql/main/writing/delete/delete_then_insert.test
+# description: DELETE followed by INSERT in the same session produces correct round-trip values
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/delete_then_insert' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west'), (3, 'east')) v(id, region);
+
+query I
+SELECT count(*) FROM t;
+----
+3
+
+# Delete the 'east' partition
+query I
+DELETE FROM t WHERE region = 'east';
+----
+2
+
+query I
+SELECT count(*) FROM t;
+----
+1
+
+query I
+SELECT id FROM t;
+----
+2
+
+# Insert new rows into the table
+statement ok
+INSERT INTO t VALUES (4, 'north'), (5, 'south');
+
+query I
+SELECT count(*) FROM t;
+----
+3
+
+query I rowsort
+SELECT id FROM t;
+----
+2
+4
+5
+
+statement ok
+DETACH t;
+
+# Verify persistence after re-attach
+statement ok
+ATTACH '__TEST_DIR__/delete_then_insert' AS tr (TYPE delta);
+
+query I
+SELECT count(*) FROM tr;
+----
+3
+
+query I rowsort
+SELECT id FROM tr;
+----
+2
+4
+5
+
+statement ok
+DETACH tr;

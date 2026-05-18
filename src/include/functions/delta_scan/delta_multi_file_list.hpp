@@ -19,6 +19,8 @@
 
 namespace duckdb {
 
+class DeltaTableEntry;
+
 struct DeltaFileMetaData {
 	DeltaFileMetaData() {};
 
@@ -33,6 +35,17 @@ struct DeltaFileMetaData {
 	}
 
 	idx_t delta_snapshot_version = DConstants::INVALID_INDEX;
+	//! Position of this file within the *unfiltered* snapshot, as enumerated by the initial
+	//! scan_metadata_next visit order (set by ScanDataCallBack::VisitCallbackInternal as
+	//! resolved_files.size() - 1 after each push_back). Used by StageRemoveFiles to address
+	//! files in the kernel's remove selection vector via a fresh no-filter
+	//! scan_metadata_next_arrow pass over the same snapshot.
+	//!
+	//! IMPORTANT: when the DeltaMultiFileList was created by PushdownInternal (partition
+	//! filter pushdown), its resolved_files are a SUBSET of the original snapshot and
+	//! file_number values start at 0 within the pruned scan — they are NOT original-snapshot
+	//! indices. Callers that need the original index (e.g. DeltaCatalog::PlanDelete /
+	//! BuildDeletePlan) must perform a path-based lookup against the unfiltered snapshot.
 	idx_t file_number = DConstants::INVALID_INDEX;
 	idx_t cardinality = DConstants::INVALID_INDEX;
 	ffi::KernelBoolSlice selection_vector = {nullptr, 0};
@@ -87,8 +100,30 @@ public:
 	idx_t GetTotalFileCount() const override;
 	unique_ptr<NodeStatistics> GetCardinality(ClientContext &context) const override;
 	DeltaFileMetaData &GetMetaData(idx_t index) const;
+	//! Fills out with the cardinality of every file in snapshot order under a single lock acquisition.
+	//! The snapshot must already be fully materialized (e.g. after GetTotalFileCount()).
+	void GetAllCardinalities(vector<idx_t> &out) const;
+	//! Fills out with a path -> resolved_files index map under a single lock acquisition.
+	//! The snapshot must already be fully materialized (e.g. after GetTotalFileCount()).
+	void BuildPathIndexMap(unordered_map<string, idx_t> &out) const;
+	//! Returns the path of the i-th file without copying the full resolved_files vector.
+	string GetFilePath(idx_t i) const;
 	idx_t GetVersion();
 	vector<string> GetPartitionColumns();
+
+	//! Stage Remove actions onto the kernel transaction for all files whose
+	//! index is in file_indices. Opens a fresh scan over this snapshot (no
+	//! filters), iterates via scan_metadata_next_arrow batch by batch, and
+	//! calls ffi::remove_files once per batch. The selection vector passed to
+	//! the kernel for each batch marks exactly the rows corresponding to
+	//! file_indices as selected for removal.
+	//!
+	//! file_indices values are positions into the resolved_files vector
+	//! built up by ScanDataCallBack (the same indices used by GetMetaData).
+	//!
+	//! Throws IOException on any kernel failure.
+	void StageRemoveFiles(ClientContext &context, const vector<idx_t> &file_indices,
+	                      KernelExclusiveTransaction &kernel_transaction) const;
 
 	vector<DeltaMultiFileColumnDefinition> &GetLazyLoadedGlobalColumns() const;
 	vector<NestedNotNullConstraint> GetNestedNotNullConstraints() const;
@@ -101,6 +136,12 @@ protected:
 protected:
 	OpenFileInfo GetFileInternal(idx_t i) const;
 	idx_t GetTotalFileCountInternal() const;
+	//! Fills out with the cardinality of each file in metadata order.
+	//! req: this.lock must already be owned and the snapshot fully materialized.
+	void GetAllCardinalitiesInternal(vector<idx_t> &out) const;
+	//! Fills out with path -> original resolved_files index for every file.
+	//! req: this.lock must already be owned and the snapshot fully materialized.
+	void BuildPathIndexMapInternal(unordered_map<string, idx_t> &out) const;
 	void InitializeSnapshot() const;
 	void InitializeScan() const;
 
@@ -123,6 +164,12 @@ public: // TODO: clean up
 
 	mutable KernelExternEngine extern_engine;
 	mutable shared_ptr<SharedKernelSnapshot> snapshot;
+
+	//! Non-owning pointer to the owning DeltaTableEntry, set when this snapshot is used
+	//! via the catalog path (DeltaTableEntry::GetScanFunctionInternal). Used by
+	//! DeltaScanGetBindInfo so DuckDB's DELETE/UPDATE planner can resolve the table entry.
+	//! Null when the snapshot is used via the direct delta_scan() function path.
+	optional_ptr<DeltaTableEntry> table_entry;
 
 	mutable unique_ptr<DeltaLogPathArray> delta_log_path;
 

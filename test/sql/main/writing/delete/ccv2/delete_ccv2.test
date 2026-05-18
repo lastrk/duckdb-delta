@@ -1,0 +1,86 @@
+# name: test/sql/main/writing/delete/ccv2/delete_ccv2.test
+# description: CCv2 DELETE via parent_commit=true with the test-only
+#              __internal_delta_test_ccv2_commit_staged fixture function.
+#              The test committer IS called during the DELETE commit: it
+#              receives the staged commit file and promotes it to the
+#              published log path.
+# group: [delete_ccv2]
+
+require parquet
+
+require delta
+
+require notwindows
+
+require debug
+
+# ---------------------------------------------------------------------------
+# Test 1: CCv2 DELETE — remove a partition after a CCv2 CTAS.
+# The CTAS writes version 0 via the UC committer path.  The DELETE then
+# stages removes and commits as version 1 via the same UCCommitter callback.
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH ':memory:' AS parent;
+
+statement ok
+ATTACH '__TEST_DIR__/ccv2del/t1' AS t1 (TYPE delta, allow_create true,
+                                        parent_commit true,
+                                        parent_catalog 'parent',
+                                        parent_commit_function_name '__internal_delta_test_ccv2_commit_staged',
+                                        unity_table_id 'test-del-table-id-1');
+
+statement ok
+CREATE TABLE t1.t1 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west')) v(id, region);
+
+# Verify CTAS delta log was created.
+query I
+SELECT count(*) > 0 FROM glob('__TEST_DIR__/ccv2del/t1/_delta_log/00000000000000000000.json');
+----
+true
+
+query II rowsort
+SELECT id, region FROM t1;
+----
+1	east
+2	west
+
+# Perform DELETE inside the CCv2 catalog — commits version 1.
+query I
+DELETE FROM t1 WHERE region = 'east';
+----
+1
+
+# Verify DELETE delta log was created.
+query I
+SELECT count(*) > 0 FROM glob('__TEST_DIR__/ccv2del/t1/_delta_log/00000000000000000001.json');
+----
+true
+
+query II rowsort
+SELECT id, region FROM t1;
+----
+2	west
+
+statement ok
+DETACH t1;
+
+statement ok
+DETACH parent;
+
+# Re-attach with explicit max_catalog_version=1 to verify persistence.
+statement ok
+ATTACH '__TEST_DIR__/ccv2del/t1' AS t1r (TYPE delta, max_catalog_version 1);
+
+query I
+SELECT count(*) FROM t1r;
+----
+1
+
+query II
+SELECT id, region FROM t1r;
+----
+2	west
+
+statement ok
+DETACH t1r;

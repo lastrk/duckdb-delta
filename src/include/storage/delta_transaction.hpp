@@ -38,6 +38,14 @@ public:
 
 	void Append(ClientContext &context, const vector<DeltaDataFile> &append_files);
 
+	//! v1 file-level DELETE: stages Remove actions for the given file_index values via
+	//! ffi::remove_files. file_indices are positions into the current DeltaMultiFileList
+	//! resolved_files. Calls InitializeTransaction() lazily on first use, identical to
+	//! Append(). No-op when file_indices is empty.
+	//!
+	//! Must NOT be called when mode == CREATING_TABLE. (D_ASSERT enforces this.)
+	void RemoveFiles(ClientContext &context, DeltaMultiFileList &snapshot, const vector<idx_t> &file_indices);
+
 	//! CTAS-only: drive the kernel CreateTableBuilder → ExclusiveCreateTransaction chain and
 	//! transition the transaction to CREATING_TABLE mode. The schema is built from
 	//! info.Base().columns; partition column names are extracted from info.Base().partition_keys.
@@ -103,6 +111,12 @@ private:
 	const AccessMode access_mode;
 
 	vector<DeltaDataFile> outstanding_appends;
+
+	//! True once at least one RemoveFiles call staged any Remove actions on
+	//! kernel_transaction. Used by Commit() so that we still commit when
+	//! outstanding_appends is empty but outstanding_removes > 0.
+	//! Counts files removed (cumulative across multiple DELETEs in one transaction).
+	idx_t outstanding_removes = 0;
 
 	DeltaTransactionMode mode = DeltaTransactionMode::REGULAR;
 

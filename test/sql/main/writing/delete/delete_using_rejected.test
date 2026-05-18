@@ -1,0 +1,24 @@
+# name: test/sql/main/writing/delete/delete_using_rejected.test
+# description: DELETE ... USING is rejected with a clear error
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/del_using' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 AS SELECT range AS id FROM range(3);
+
+# DELETE ... USING / join is not yet supported for Delta tables.
+statement error
+DELETE FROM t1 USING t1 AS other WHERE t1.id = other.id AND other.id = 1;
+----
+DELETE ... USING / join is not yet supported
+
+statement ok
+DETACH t1;

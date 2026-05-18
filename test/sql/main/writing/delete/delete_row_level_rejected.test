@@ -1,0 +1,46 @@
+# name: test/sql/main/writing/delete/delete_row_level_rejected.test
+# description: Row-level DELETE (predicate referencing non-partition columns) raises NotImplementedException
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/delete_rowlevel' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east', 100), (2, 'west', 200)) v(id, region, value);
+
+# Filter on non-partition column: rejected
+statement error
+DELETE FROM t WHERE value > 100;
+----
+Row-level DELETE is not yet supported
+
+# Mixed: partition AND non-partition column: also rejected
+statement error
+DELETE FROM t WHERE region = 'east' AND value > 50;
+----
+Row-level DELETE is not yet supported
+
+# Non-partitioned table: any WHERE with a data column is rejected
+statement ok
+ATTACH '__TEST_DIR__/delete_rowlevel_nopart' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 AS SELECT range AS id FROM range(5);
+
+statement error
+DELETE FROM t2 WHERE id = 3;
+----
+Row-level DELETE is not yet supported
+
+statement ok
+DETACH t;
+
+statement ok
+DETACH t2;

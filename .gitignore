@@ -21,3 +21,6 @@ ccache_dir/
 .devcontainer/.claude-auth-token
 .devcontainer/.claude-base-url
 .devcontainer/.claude-custom-headers
+
+# Git worktrees
+.worktrees/

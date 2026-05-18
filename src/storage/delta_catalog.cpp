@@ -19,6 +19,7 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "functions/delta_scan/delta_multi_file_list.hpp"
+#include "storage/delta_delete.hpp"
 
 namespace duckdb {
 
@@ -217,10 +218,7 @@ PhysicalOperator &DeltaCatalog::PlanCreateTableAs(ClientContext &context, Physic
 
 	return insert;
 }
-PhysicalOperator &DeltaCatalog::PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
-                                           PhysicalOperator &plan) {
-	throw NotImplementedException("DeltaCatalog PlanDelete");
-}
+// PlanDelete is implemented in src/storage/delta_delete.cpp
 PhysicalOperator &DeltaCatalog::PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
                                            PhysicalOperator &plan) {
 	throw NotImplementedException("DeltaCatalog PlanUpdate");

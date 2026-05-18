@@ -1,0 +1,23 @@
+# name: test/sql/main/writing/delete/delete_returning_rejected.test
+# description: DELETE ... RETURNING raises BinderException
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '__TEST_DIR__/delete_returning' AS t (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t.t AS SELECT range AS id FROM range(5);
+
+statement error
+DELETE FROM t RETURNING *;
+----
+RETURNING clause is not yet supported
+
+statement ok
+DETACH t;

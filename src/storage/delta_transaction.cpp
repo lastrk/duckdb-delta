@@ -482,7 +482,7 @@ void DeltaTransaction::Commit(ClientContext &context) {
 			return;
 		}
 
-		if (!outstanding_appends.empty()) {
+		if (!outstanding_appends.empty() || outstanding_removes > 0) {
 			// Finally we add the registered transaction versions
 			for (const auto &app_version : app_versions) {
 				auto app_id = app_version.first;
@@ -651,6 +651,23 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 
 		ffi::add_files(kernel_transaction.get(), write_metadata_engine_data.release());
 	}
+}
+
+void DeltaTransaction::RemoveFiles(ClientContext &context, DeltaMultiFileList &snapshot,
+                                   const vector<idx_t> &file_indices) {
+	// Short-circuit: nothing to remove — do not start a kernel transaction.
+	if (file_indices.empty()) {
+		return;
+	}
+	D_ASSERT(mode != DeltaTransactionMode::CREATING_TABLE);
+	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
+		InitializeTransaction(context);
+	}
+
+	snapshot.StageRemoveFiles(context, file_indices, kernel_transaction);
+	DUCKDB_LOG_INTERNAL(context, "delta.RemoveFiles", LogLevel::LOG_DEBUG, "Staged %s remove actions for %s",
+	                    to_string(file_indices.size()), snapshot.GetPath());
+	outstanding_removes += file_indices.size();
 }
 
 void DeltaTransaction::InitializeForNewTable(ClientContext &context, const string &table_path,

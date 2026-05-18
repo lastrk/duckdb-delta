@@ -1,0 +1,160 @@
+# name: test/sql/main/writing/delete/delete_transaction.test
+# description: DELETE ROLLBACK/COMMIT semantics; multi-op transaction with DELETE + INSERT
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: ROLLBACK after DELETE restores original data
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/rollback' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west')) v(id, region);
+
+query I
+SELECT count(*) FROM t1;
+----
+2
+
+statement ok
+BEGIN;
+
+query I
+DELETE FROM t1 WHERE region = 'east';
+----
+1
+
+# Delta removes are staged in the kernel transaction and only become visible
+# after COMMIT.  Within the same BEGIN/ROLLBACK block the snapshot is taken
+# at transaction start, so reads still see the pre-DELETE state.
+query I
+SELECT count(*) FROM t1;
+----
+2
+
+statement ok
+ROLLBACK;
+
+# After rollback the row is back
+query I
+SELECT count(*) FROM t1;
+----
+2
+
+statement ok
+DETACH t1;
+
+# Re-attach confirms 2 rows
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/rollback' AS t1r (TYPE delta);
+
+query I
+SELECT count(*) FROM t1r;
+----
+2
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: COMMIT after DELETE persists the change
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/commit' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west')) v(id, region);
+
+statement ok
+BEGIN;
+
+query I
+DELETE FROM t2 WHERE region = 'east';
+----
+1
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM t2;
+----
+1
+
+statement ok
+DETACH t2;
+
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/commit' AS t2r (TYPE delta);
+
+query I
+SELECT count(*) FROM t2r;
+----
+1
+
+statement ok
+DETACH t2r;
+
+# ---------------------------------------------------------------------------
+# Part 3: Multi-operation transaction: DELETE then INSERT, both committed
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/multi' AS t3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3.t3 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west')) v(id, region);
+
+statement ok
+BEGIN;
+
+query I
+DELETE FROM t3 WHERE region = 'east';
+----
+1
+
+statement ok
+INSERT INTO t3 VALUES (3, 'north');
+
+statement ok
+COMMIT;
+
+# After commit: east removed, north added — west still present
+query I
+SELECT count(*) FROM t3;
+----
+2
+
+query I rowsort
+SELECT DISTINCT region FROM t3;
+----
+north
+west
+
+statement ok
+DETACH t3;
+
+statement ok
+ATTACH '__TEST_DIR__/delete_txn/multi' AS t3r (TYPE delta);
+
+query I
+SELECT count(*) FROM t3r;
+----
+2
+
+query I rowsort
+SELECT DISTINCT region FROM t3r;
+----
+north
+west
+
+statement ok
+DETACH t3r;

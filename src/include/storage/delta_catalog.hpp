@@ -98,6 +98,14 @@ public:
 	                             optional_ptr<PhysicalOperator> plan) override;
 	PhysicalOperator &PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner, LogicalCreateTable &op,
 	                                    PhysicalOperator &plan) override;
+	//! Primary entry point: called by CreatePlan(LogicalDelete) before the child
+	//! operator's physical plan is built. We extract filter expressions here,
+	//! before CreatePlan(LogicalFilter) moves them into PhysicalFilter.
+	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner,
+	                             LogicalDelete &op) override;
+	//! Required by pure-virtual base; delegates to the 3-argument override from
+	//! Catalog. Must not be used from Delta code (filter expressions are already
+	//! moved by this point). Kept to satisfy the vtable contract.
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op,
 	                             PhysicalOperator &plan) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,

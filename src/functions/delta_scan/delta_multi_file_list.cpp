@@ -18,6 +18,7 @@
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 
 #include <regex>
+#include <unordered_set>
 
 #include "duckdb/planner/constraints/bound_not_null_constraint.hpp"
 
@@ -504,11 +505,31 @@ void ScanDataCallBack::VisitCallbackInternal(ffi::NullableCvoid engine_context, 
 void ScanDataCallBack::VisitCallback(ffi::NullableCvoid engine_context, ffi::KernelStringSlice path, int64_t size,
                                      int64_t mod_time, const ffi::Stats *stats, const ffi::CDvInfo *dv_info,
                                      const ffi::Expression *transform, const ffi::CStringMap *partition_values) {
+	auto *context = static_cast<ScanDataCallBack *>(engine_context);
 	try {
-		return VisitCallbackInternal(engine_context, path, size, mod_time, stats, dv_info, transform);
+		VisitCallbackInternal(engine_context, path, size, mod_time, stats, dv_info, transform);
 	} catch (std::runtime_error &e) {
-		auto context = (ScanDataCallBack *)engine_context;
 		context->error = ErrorData(e);
+		return;
+	}
+
+	// Fallback: populate partition_map from the kernel-provided partition_values when the
+	// snapshot metadata does not report partition columns (partitionColumns: [] in the
+	// Delta metaData action). This occurs for tables written by DuckDB's CTAS path because
+	// the kernel's create_table_builder API does not currently expose a way to set
+	// partitionColumns (TODO delta-kernel-rs #2355). The per-add-action partitionValues
+	// are always present for Hive-partitioned files and let us infer partition column names.
+	//
+	// Values are stored as VARCHAR; the multi-file reader casts them to the column's
+	// logical type via Value::DefaultCastAs when injecting partition constants.
+	if (!context->error.HasError() && partition_values && !context->snapshot.metadata.empty() &&
+	    context->snapshot.partitions.empty() && context->snapshot.metadata.back()->partition_map.empty()) {
+		auto &partition_map = context->snapshot.metadata.back()->partition_map;
+		ffi::visit_string_map(partition_values, &partition_map,
+		                      [](ffi::NullableCvoid ctx, ffi::KernelStringSlice key, ffi::KernelStringSlice value) {
+			                      auto &pm = *static_cast<case_insensitive_map_t<Value> *>(const_cast<void *>(ctx));
+			                      pm[KernelUtils::FromDeltaString(key)] = Value(KernelUtils::FromDeltaString(value));
+		                      });
 	}
 }
 
@@ -1100,6 +1121,37 @@ DeltaFileMetaData &DeltaMultiFileList::GetMetaData(idx_t index) const {
 	return *metadata[index];
 }
 
+void DeltaMultiFileList::GetAllCardinalitiesInternal(vector<idx_t> &out) const {
+	// req: caller must already hold this.lock and the snapshot must be fully materialized.
+	out.reserve(metadata.size());
+	for (const auto &meta : metadata) {
+		out.push_back(meta->cardinality);
+	}
+}
+
+void DeltaMultiFileList::BuildPathIndexMapInternal(unordered_map<string, idx_t> &out) const {
+	// req: caller must already hold this.lock and the snapshot must be fully materialized.
+	out.reserve(resolved_files.size());
+	for (idx_t i = 0; i < resolved_files.size(); i++) {
+		out.emplace(resolved_files[i].path, i);
+	}
+}
+
+void DeltaMultiFileList::GetAllCardinalities(vector<idx_t> &out) const {
+	unique_lock<mutex> lck(lock);
+	GetAllCardinalitiesInternal(out);
+}
+
+void DeltaMultiFileList::BuildPathIndexMap(unordered_map<string, idx_t> &out) const {
+	unique_lock<mutex> lck(lock);
+	BuildPathIndexMapInternal(out);
+}
+
+string DeltaMultiFileList::GetFilePath(idx_t i) const {
+	unique_lock<mutex> lck(lock);
+	return GetFileInternal(i).path;
+}
+
 vector<string> DeltaMultiFileList::GetPartitionColumns() {
 	unique_lock<mutex> lck(lock);
 	EnsureScanInitialized();
@@ -1123,6 +1175,149 @@ bool DeltaMultiFileList::HasNullConstraintsInArrays() const {
 	EnsureScanInitialized();
 	return has_null_constraints_in_arrays;
 };
+
+// RAII guard that frees a ScanMetadataArrowResult (and its owned CTransforms /
+// selection_vector) on scope exit.  The ArrowFFIData.array is expected to have its
+// release pointer nulled before this guard fires (see StageRemoveFiles) so that
+// free_scan_metadata_arrow_result does not double-free an array already consumed by
+// get_engine_data.
+struct ScanMetadataArrowResultGuard {
+	ffi::ScanMetadataArrowResult *ptr;
+	explicit ScanMetadataArrowResultGuard(ffi::ScanMetadataArrowResult *p) : ptr(p) {
+	}
+	~ScanMetadataArrowResultGuard() {
+		if (ptr) {
+			ffi::free_scan_metadata_arrow_result(ptr);
+		}
+	}
+	ScanMetadataArrowResultGuard(const ScanMetadataArrowResultGuard &) = delete;
+	ScanMetadataArrowResultGuard &operator=(const ScanMetadataArrowResultGuard &) = delete;
+};
+
+void DeltaMultiFileList::StageRemoveFiles(ClientContext &context, const vector<idx_t> &file_indices,
+                                          KernelExclusiveTransaction &kernel_transaction) const {
+	D_ASSERT(!file_indices.empty());
+
+	// Build a fast lookup set from file_indices.
+	unordered_set<idx_t> remove_set(file_indices.begin(), file_indices.end());
+
+	// Open a fresh (no-filter) scan over the snapshot so the iterator visits all files.
+	// We must hold the snapshot lock only while constructing the scan, then release it
+	// before iterating (the iterator is independent once created).
+	KernelScan fresh_scan;
+	KernelScanDataIterator iter;
+	{
+		unique_lock<mutex> lck(lock);
+		EnsureSnapshotInitialized();
+
+		auto snapshot_ref = snapshot->GetLockingRef();
+		// nullptr predicate visitor = no filters; visits all files.
+		fresh_scan = TryUnpackKernelResult(ffi::scan(snapshot_ref.GetPtr(), extern_engine.get(), nullptr, nullptr));
+		iter = TryUnpackKernelResult(ffi::scan_metadata_iter_init(extern_engine.get(), fresh_scan.get()));
+	}
+
+	// Iterate all batches.  global_file_idx tracks the index of the next active ADD file
+	// (i.e., the next entry in resolved_files / metadata) across batches.  Each batch contains
+	// all log entries for one replay chunk; only the rows marked true in the kernel selection
+	// vector are active ADD files.  Non-ADD rows (commitInfo, protocol, metaData, remove) are
+	// false in the selection vector and must NOT be counted toward global_file_idx.
+	idx_t global_file_idx = 0;
+	while (true) {
+		ffi::ScanMetadataArrowResult *raw_result = nullptr;
+		{
+			// No snapshot lock needed here — iter is independent.
+			ErrorData err;
+			ffi::ExternResult<ffi::ScanMetadataArrowResult *> res =
+			    ffi::scan_metadata_next_arrow(iter.get(), extern_engine.get());
+			err = KernelUtils::TryUnpackResult(res, raw_result);
+			if (err.HasError()) {
+				throw IOException("DeltaMultiFileList::StageRemoveFiles: scan_metadata_next_arrow failed: %s",
+				                  err.RawMessage());
+			}
+		}
+		// null result = iterator exhausted
+		if (!raw_result) {
+			break;
+		}
+
+		// RAII guard: frees raw_result (and its owned CTransforms / selection_vector)
+		// on scope exit, even on error.  The ArrowFFIData.array.release pointer is nulled
+		// below before this guard fires so that free_scan_metadata_arrow_result does not
+		// attempt to release an array already consumed by get_engine_data.
+		ScanMetadataArrowResultGuard guard(raw_result);
+
+		// The Arrow array length is the total number of rows in this batch (one per log entry).
+		const idx_t batch_rows = NumericCast<idx_t>(raw_result->arrow_data.array.length);
+
+		// The kernel selection vector has one bool per batch row: true = active ADD file row.
+		// Its length always equals batch_rows (kernel guarantees this for scan_metadata).
+		// A length-0 vector means "all rows are active ADD files" (FilteredEngineData convention).
+		const bool *orig_sv_ptr = raw_result->selection_vector.ptr;
+		const idx_t orig_sv_len = raw_result->selection_vector.len;
+		D_ASSERT(orig_sv_len == 0 || orig_sv_len == batch_rows);
+
+		// Build the remove selection vector for this batch, and count active ADD file rows
+		// in this batch so global_file_idx can be advanced correctly.
+		// remove_sv[i] = 1 iff row i is an active ADD file that should be removed.
+		vector<uint8_t> remove_sv(batch_rows, 0);
+		bool any_selected = false;
+		idx_t active_in_batch = 0;
+		for (idx_t row = 0; row < batch_rows; row++) {
+			// A row is an active ADD file if orig_sv is all-selected (len==0) or orig_sv[row]==true.
+			const bool row_is_active = (orig_sv_len == 0) || orig_sv_ptr[row];
+			if (row_is_active) {
+				if (remove_set.count(global_file_idx + active_in_batch) != 0) {
+					remove_sv[row] = 1;
+					any_selected = true;
+				}
+				active_in_batch++;
+			}
+		}
+
+		// Extract the FFI_ArrowArray from the result by value-copy + null the original.
+		// get_engine_data takes FFI_ArrowArray by C value (i.e. moves it in Rust via
+		// from_ffi which calls the release callback on its copy, then zeroes it). We must
+		// null the release pointer inside raw_result before the RAII guard frees the
+		// ScanMetadataArrowResult; otherwise free_scan_metadata_arrow_result would drop
+		// the same ArrowArray again (double-free / crash).
+		ffi::FFI_ArrowArray array_copy = raw_result->arrow_data.array;
+		raw_result->arrow_data.array.release = nullptr; // Guard can now safely drop this
+		ffi::ExclusiveEngineData *engine_data_raw = nullptr;
+		auto err = KernelUtils::TryUnpackResult(
+		    ffi::get_engine_data(array_copy, &raw_result->arrow_data.schema, DuckDBEngineError::AllocateError),
+		    engine_data_raw);
+		if (err.HasError()) {
+			throw IOException("DeltaMultiFileList::StageRemoveFiles: get_engine_data failed: %s", err.RawMessage());
+		}
+		KernelEngineData engine_data(engine_data_raw);
+
+		if (any_selected) {
+			// Call remove_files with the engine_data and our per-batch selection vector.
+			bool ok = false;
+			auto remove_err =
+			    KernelUtils::TryUnpackResult(ffi::remove_files(kernel_transaction.get(), engine_data.release(),
+			                                                   remove_sv.data(), remove_sv.size(), extern_engine.get()),
+			                                 ok);
+			if (remove_err.HasError()) {
+				throw IOException("DeltaMultiFileList::StageRemoveFiles: remove_files failed: %s",
+				                  remove_err.RawMessage());
+			}
+		}
+		// engine_data was either consumed by remove_files (release()) or still held.
+		// If any_selected==false, engine_data goes out of scope here and is freed by RAII.
+
+		global_file_idx += active_in_batch;
+	}
+
+	// Every active ADD file in the snapshot must have been visited by the iterator.
+	// global_file_idx must equal the total snapshot file count — if it is smaller, the
+	// iterator yielded fewer entries than the snapshot contained at plan time, which would
+	// mean some file_indices were never matched (silent data loss).
+	{
+		unique_lock<mutex> lck(lock);
+		D_ASSERT(global_file_idx == GetTotalFileCountInternal());
+	}
+}
 
 unique_ptr<MultiFileReader> DeltaMultiFileReader::CreateInstance(const TableFunction &table_function) {
 	auto result = make_uniq<DeltaMultiFileReader>();

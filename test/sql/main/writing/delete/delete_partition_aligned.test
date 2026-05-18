@@ -1,0 +1,206 @@
+# name: test/sql/main/writing/delete/delete_partition_aligned.test
+# description: Partition-aligned DELETE — WHERE partition_col = value, IN (...), multi-partition
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: Single partition value DELETE
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/single' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west'), (3, 'east'), (4, 'north'))
+v(id, region);
+
+query I
+SELECT count(*) FROM t1;
+----
+4
+
+# Delete all rows in the 'west' partition
+query I
+DELETE FROM t1 WHERE region = 'west';
+----
+1
+
+query I
+SELECT count(*) FROM t1;
+----
+3
+
+query I rowsort
+SELECT DISTINCT region FROM t1;
+----
+east
+north
+
+statement ok
+DETACH t1;
+
+# Re-attach and verify persistence
+statement ok
+ATTACH '__TEST_DIR__/delete_part/single' AS t1r (TYPE delta);
+
+query I
+SELECT count(*) FROM t1r;
+----
+3
+
+query I rowsort
+SELECT DISTINCT region FROM t1r;
+----
+east
+north
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: Delete a partition that matches multiple files (two 'east' rows →
+# one partition, 1 file after CTAS partition writing)
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/east' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west'), (3, 'east')) v(id, region);
+
+query I
+DELETE FROM t2 WHERE region = 'east';
+----
+2
+
+query I
+SELECT count(*) FROM t2;
+----
+1
+
+query I
+SELECT region FROM t2;
+----
+west
+
+statement ok
+DETACH t2;
+
+# ---------------------------------------------------------------------------
+# Part 3: Delete a non-existent partition value — 0 rows, no commit
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/norow' AS t3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3.t3 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west')) v(id, region);
+
+query I
+DELETE FROM t3 WHERE region = 'south';
+----
+0
+
+query I
+SELECT count(*) FROM t3;
+----
+2
+
+statement ok
+DETACH t3;
+
+# ---------------------------------------------------------------------------
+# Part 4: Multi-column partition DELETE
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/multicol' AS t4 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t4.t4 PARTITIONED BY (region, year) AS
+SELECT * FROM (VALUES ('east', 2024, 10), ('west', 2024, 20), ('east', 2025, 30))
+v(region, year, sales);
+
+query I
+DELETE FROM t4 WHERE region = 'east' AND year = 2024;
+----
+1
+
+query I
+SELECT count(*) FROM t4;
+----
+2
+
+query II rowsort
+SELECT region, year FROM t4;
+----
+east	2025
+west	2024
+
+statement ok
+DETACH t4;
+
+# ---------------------------------------------------------------------------
+# Part 5: Sequential DELETE calls remove different partitions
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/seq' AS t5 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t5.t5 PARTITIONED BY (part) AS
+SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) v(id, part);
+
+query I
+DELETE FROM t5 WHERE part = 'a';
+----
+1
+
+query I
+DELETE FROM t5 WHERE part = 'c';
+----
+1
+
+query I
+SELECT id FROM t5;
+----
+2
+
+statement ok
+DETACH t5;
+
+# ---------------------------------------------------------------------------
+# Part 6: NULL partition value DELETE
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_part/null_part' AS t6 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t6.t6 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, NULL)) v(id, region);
+
+query I
+SELECT count(*) FROM t6;
+----
+2
+
+query I
+DELETE FROM t6 WHERE region = 'east';
+----
+1
+
+query I
+SELECT count(*) FROM t6;
+----
+1
+
+query I
+SELECT id FROM t6;
+----
+2
+
+statement ok
+DETACH t6;

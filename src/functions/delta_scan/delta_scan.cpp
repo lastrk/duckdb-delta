@@ -1,6 +1,10 @@
 #include "delta_functions.hpp"
 #include "functions/delta_scan/delta_scan.hpp"
+#include "functions/delta_scan/delta_multi_file_list.hpp"
 #include "functions/delta_scan/delta_multi_file_reader.hpp"
+#include "storage/delta_table_entry.hpp"
+
+#include "duckdb/common/multi_file/multi_file_states.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -71,6 +75,20 @@ virtual_column_map_t DeltaVirtualColumns(ClientContext &, optional_ptr<FunctionD
 	return result;
 }
 
+static BindInfo DeltaScanGetBindInfo(const optional_ptr<FunctionData> bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	// When used via the catalog path, the file_list is a DeltaMultiFileList that
+	// carries a back-pointer to the owning DeltaTableEntry (set by
+	// DeltaTableEntry::GetScanFunctionInternal). Return it so DuckDB's DELETE/UPDATE
+	// planner can find the table.
+	auto *delta_list = dynamic_cast<DeltaMultiFileList *>(bind_data.file_list.get());
+	if (delta_list && delta_list->table_entry) {
+		return BindInfo(*delta_list->table_entry);
+	}
+	// Direct delta_scan() function path: no catalog entry — return EXTERNAL scan type.
+	return BindInfo(ScanType::EXTERNAL);
+}
+
 static void DeltaScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
                                const TableFunction &function) {
 	throw NotImplementedException("DeltaScan serialization not implemented");
@@ -100,7 +118,7 @@ TableFunctionSet DeltaFunctions::GetDeltaScanFunction(ExtensionLoader &loader) {
 		function.deserialize = DeltaScanDeserialize;
 		function.statistics = nullptr;
 		function.table_scan_progress = nullptr;
-		function.get_bind_info = nullptr;
+		function.get_bind_info = DeltaScanGetBindInfo;
 		function.get_virtual_columns = DeltaVirtualColumns;
 		function.late_materialization = false;
 

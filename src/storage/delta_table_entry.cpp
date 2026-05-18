@@ -65,6 +65,8 @@ TableFunction DeltaTableEntry::GetScanFunctionInternal(ClientContext &context, u
 
 	function_info->snapshot = this->snapshot;
 	function_info->table_name = delta_catalog.GetName();
+	// Expose this table entry so get_bind_info can return it to DuckDB's DELETE/UPDATE planner.
+	this->snapshot->table_entry = this;
 	delta_scan_function.function_info = std::move(function_info);
 
 	vector<Value> inputs = {delta_catalog.GetDBPath()};

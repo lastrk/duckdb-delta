@@ -1,0 +1,123 @@
+# name: test/sql/main/writing/delete/delete_full_table.test
+# description: DELETE FROM t (no WHERE) removes all files, returns full row count, leaves parquet files on disk
+# group: [delete]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# ---------------------------------------------------------------------------
+# Part 1: DELETE FROM non-partitioned table, no WHERE
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_full/no_part' AS t1 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t1.t1 AS SELECT range AS id FROM range(10);
+
+query I
+SELECT count(*) FROM t1;
+----
+10
+
+# DELETE FROM with no WHERE removes all rows; COUNT reports 10
+query I
+DELETE FROM t1;
+----
+10
+
+# Post-delete scan returns 0 rows
+query I
+SELECT count(*) FROM t1;
+----
+0
+
+statement ok
+DETACH t1;
+
+# Re-attach: still 0 rows (Remove actions in the log)
+statement ok
+ATTACH '__TEST_DIR__/delete_full/no_part' AS t1r (TYPE delta);
+
+query I
+SELECT count(*) FROM t1r;
+----
+0
+
+statement ok
+DETACH t1r;
+
+# ---------------------------------------------------------------------------
+# Part 2: DELETE FROM partitioned table, no WHERE
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_full/part' AS t2 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t2.t2 PARTITIONED BY (region) AS
+SELECT * FROM (VALUES (1, 'east'), (2, 'west'), (3, 'east')) v(id, region);
+
+query I
+SELECT count(*) FROM t2;
+----
+3
+
+query I
+DELETE FROM t2;
+----
+3
+
+query I
+SELECT count(*) FROM t2;
+----
+0
+
+statement ok
+DETACH t2;
+
+# Re-attach confirms 0 rows
+statement ok
+ATTACH '__TEST_DIR__/delete_full/part' AS t2r (TYPE delta);
+
+query I
+SELECT count(*) FROM t2r;
+----
+0
+
+statement ok
+DETACH t2r;
+
+# ---------------------------------------------------------------------------
+# Part 3: DELETE FROM empty table (no WHERE) — no commit (0 rows removed)
+# ---------------------------------------------------------------------------
+statement ok
+ATTACH '__TEST_DIR__/delete_full/empty' AS t3 (TYPE delta, allow_create true);
+
+statement ok
+CREATE TABLE t3.t3 AS SELECT 1 AS id WHERE false;
+
+query I
+SELECT count(*) FROM t3;
+----
+0
+
+query I
+DELETE FROM t3;
+----
+0
+
+query I
+SELECT count(*) FROM t3;
+----
+0
+
+# No commit should have been issued for the 0-row DELETE: version 1 must not exist.
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/delete_full/empty/_delta_log/00000000000000000001.json');
+----
+0
+
+statement ok
+DETACH t3;
