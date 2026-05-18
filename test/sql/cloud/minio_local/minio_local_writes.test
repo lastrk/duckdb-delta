@@ -1,0 +1,239 @@
+# name: test/sql/cloud/minio_local/minio_local_writes.test
+# description: Exercise delta write paths (CTAS, INSERT, transactions, ROLLBACK) against a local MinIO S3 server.
+# group: [minio_local]
+#
+# NOTE: this test assumes s3://test-bucket/delta_writes/* is empty at start.
+# Local runner: `scripts/local_minio.sh run …` automatically wipes that prefix.
+# CI: the minio container is freshly created per job.
+
+require httpfs
+
+require parquet
+
+require delta
+
+require aws
+
+require-env DUCKDB_MINIO_TEST_SERVER_AVAILABLE
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ENDPOINT
+
+require-env DUCKDB_S3_ENDPOINT
+
+# Override the runner's default of silently skipping on HTTP / connection
+# errors — when MinIO is the target, those errors are real failures we want
+# to surface (not skip).
+set ignore_error_messages
+
+# -----------------------------------------------------------------------------
+# setup: keep secrets isolated to this test, register a config-based S3 secret
+#
+
+statement ok
+set secret_directory='__TEST_DIR__/minio_local_writes/secrets'
+
+statement ok
+CREATE SECRET s1 (
+    TYPE S3,
+    PROVIDER config,
+    KEY_ID '${AWS_ACCESS_KEY_ID}',
+    SECRET '${AWS_SECRET_ACCESS_KEY}',
+    REGION '${AWS_DEFAULT_REGION}',
+    ENDPOINT '${DUCKDB_S3_ENDPOINT}',
+    URL_STYLE 'path',
+    USE_SSL false
+);
+
+# -----------------------------------------------------------------------------
+# test: CTAS into a fresh S3 path
+#
+
+statement ok
+ATTACH 's3://test-bucket/delta_writes/ctas_basic' AS t (TYPE delta, READ_WRITE, allow_create true);
+
+statement ok
+CREATE TABLE t.t AS SELECT i, 'row_' || i AS label FROM range(1, 4) AS r(i);
+
+query II rowsort
+SELECT i, label FROM t;
+----
+1	row_1
+2	row_2
+3	row_3
+
+# Re-attach as a separate alias to confirm the table is durably written to S3.
+statement ok
+ATTACH 's3://test-bucket/delta_writes/ctas_basic' AS t_ro (TYPE delta, READ_ONLY);
+
+query I
+SELECT count(*) FROM t_ro;
+----
+3
+
+statement ok
+DETACH t_ro;
+
+# -----------------------------------------------------------------------------
+# test: INSERT into an existing S3-backed delta table
+#
+
+statement ok
+INSERT INTO t VALUES (4, 'row_4');
+
+statement ok
+INSERT INTO t SELECT i, 'row_' || i FROM range(5, 8) AS r(i);
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+7	28
+
+statement ok
+DETACH t;
+
+# -----------------------------------------------------------------------------
+# test: multi-statement transaction commits atomically against S3
+#
+
+statement ok
+ATTACH 's3://test-bucket/delta_writes/txn_commit' AS t_txn (TYPE delta, READ_WRITE, allow_create true);
+
+statement ok
+CREATE TABLE t_txn.t_txn AS SELECT 0 AS i;
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t_txn VALUES (1);
+
+statement ok
+INSERT INTO t_txn VALUES (2);
+
+statement ok
+INSERT INTO t_txn VALUES (3);
+
+statement ok
+COMMIT
+
+query II
+SELECT count(*), sum(i) FROM t_txn;
+----
+4	6
+
+statement ok
+DETACH t_txn;
+
+# -----------------------------------------------------------------------------
+# test: ROLLBACK against S3 leaves the table unchanged
+#
+
+statement ok
+ATTACH 's3://test-bucket/delta_writes/txn_rollback' AS t_rb (TYPE delta, READ_WRITE, allow_create true);
+
+statement ok
+CREATE TABLE t_rb.t_rb AS SELECT i FROM range(10) AS r(i);
+
+query II
+SELECT count(*), sum(i) FROM t_rb;
+----
+10	45
+
+statement ok
+BEGIN TRANSACTION
+
+statement ok
+INSERT INTO t_rb VALUES (100);
+
+statement ok
+INSERT INTO t_rb VALUES (101);
+
+statement ok
+ROLLBACK
+
+# No rows added.
+query II
+SELECT count(*), sum(i) FROM t_rb;
+----
+10	45
+
+statement ok
+DETACH t_rb;
+
+# -----------------------------------------------------------------------------
+# test: rejection paths still fire over S3 (same plan-time errors as local)
+#
+
+statement ok
+ATTACH 's3://test-bucket/delta_writes/rejections' AS t_rej (TYPE delta, READ_WRITE, allow_create true);
+
+statement ok
+CREATE TABLE t_rej.t_rej AS SELECT 0 AS i;
+
+statement error
+INSERT INTO t_rej VALUES (1) RETURNING *;
+----
+RETURNING clause not yet supported for insertion into Delta table
+
+statement error
+INSERT INTO t_rej VALUES (1) ON CONFLICT DO NOTHING;
+----
+
+statement error
+CREATE OR REPLACE TABLE t_rej.t_rej AS SELECT 99 AS i;
+----
+CREATE OR REPLACE TABLE is not supported for Delta tables
+
+query II
+SELECT count(*), sum(i) FROM t_rej;
+----
+1	0
+
+statement ok
+DETACH t_rej;
+
+# -----------------------------------------------------------------------------
+# test: partitioned CTAS lands files into hive-style key prefixes on S3,
+#       and a subsequent INSERT routes into the right prefix
+#
+
+statement ok
+ATTACH 's3://test-bucket/delta_writes/partitioned' AS t_part (TYPE delta, READ_WRITE, allow_create true);
+
+statement ok
+CREATE TABLE t_part.t_part PARTITIONED BY (part) AS
+SELECT i, i % 2 AS part FROM range(10) AS r(i);
+
+query III
+SELECT count(*), sum(i), sum(part) FROM t_part;
+----
+10	45	5
+
+# Append into the partitioned table; partition column auto-detected.
+statement ok
+INSERT INTO t_part VALUES (100, 0), (101, 1);
+
+query III
+SELECT count(*), sum(i), sum(part) FROM t_part;
+----
+12	246	6
+
+# Filter on the partition column should still return the right rows after the append.
+query I
+SELECT count(*) FROM t_part WHERE part = 0;
+----
+6
+
+query I
+SELECT count(*) FROM t_part WHERE part = 1;
+----
+6
+
+statement ok
+DETACH t_part;
