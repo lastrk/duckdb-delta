@@ -1,5 +1,7 @@
 # name: test/sql/main/writing/ctas/ctas_ccv2.test
 # description: CCv2 CTAS via parent_commit=true with the test-only
+# group: [ctas]
+
 #              __internal_delta_test_ccv2_commit_staged fixture function.
 #              The test committer IS called during CTAS: it receives the
 #              staged commit file and promotes it to the published log path.
@@ -9,7 +11,6 @@
 #              be specified (catalogManaged tables always require this per the
 #              Delta protocol; in production, Unity Catalog provides it via
 #              log_tail).
-# group: [ctas]
 
 require parquet
 

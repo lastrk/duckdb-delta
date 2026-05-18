@@ -1,8 +1,9 @@
 # name: test/sql/main/writing/ctas/ctas_partitioned.test
 # description: CTAS with PARTITIONED BY — covers single-column partition, multi-partition
+# group: [ctas]
+
 #              (multiple distinct values producing multiple files), multi-column partition,
 #              NULL partition value, empty CTAS with partitions, and missing column error.
-# group: [ctas]
 
 require parquet
 
