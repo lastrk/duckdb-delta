@@ -15,6 +15,9 @@ env:
 jobs:
   azure-tests-linux:
     name: Azure tests (Linux)
+    # Requires 1Password secrets (OP_SERVICE_ACCOUNT_TOKEN) only configured on
+    # the upstream repo. Skip on forks to avoid auth failures.
+    if: github.repository == 'duckdb/duckdb-delta'
     runs-on: ubuntu-latest
     env:
       VCPKG_TARGET_TRIPLET: x64-linux
