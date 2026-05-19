@@ -39,6 +39,33 @@ then and only then propose a change.
 
 Before forming hypotheses, gather raw facts. Do not interpret yet.
 
+## Code Search
+
+For **semantic / concept-level** queries — "where is partition pruning
+applied?", "what code wires deletion vectors into the multi-file reader?",
+"where do we cross the FFI boundary for snapshot construction?" — prefer
+**Semble** over `Grep`. It returns ranked code chunks for a natural-language
+query in milliseconds and uses ~98% fewer tokens than grep+read for the
+same investigation. Local CPU only, no API keys.
+
+```bash
+# This repo's source
+semble search 'where partition filters are pushed into the kernel' src/
+
+# Kernel internals (cloned + indexed lazily on first call; pinned to the
+# same tag as CMakeLists.txt → GIT_TAG v0.21.0)
+semble search 'snapshot scan state lifetime' https://github.com/delta-io/delta-kernel-rs
+```
+
+When to use `Grep` / `Glob` instead:
+- You know the exact symbol, string, or filename (a class name, a CMake
+  variable, a sqllogic error message).
+- You need every occurrence, not just the most relevant.
+- The target is a generated file or build artifact (Semble skips
+  `.gitignore`d paths).
+
+Otherwise default to `semble search`.
+
 ## 1a. Capture the Symptom
 
 For **compiler errors**:
