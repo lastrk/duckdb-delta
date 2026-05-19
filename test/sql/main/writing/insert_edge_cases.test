@@ -1,0 +1,184 @@
+# name: test/sql/main/writing/insert_edge_cases.test
+# description: INSERT rejection paths + column-list / type-coercion edge cases
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+# -----------------------------------------------------------------------------
+# setup: a writable copy of the inlined simple_table (single column: i BIGINT)
+#
+
+statement ok
+FROM copy_dir('data/inlined/simple_table', '__TEST_DIR__/main/writing/insert_edge_cases');
+
+statement ok
+ATTACH '__TEST_DIR__/main/writing/insert_edge_cases/delta_lake' AS t (TYPE delta);
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+# baseline parquet file count (one v0 data file + no inserts yet)
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/insert_edge_cases/delta_lake/**/*.parquet')
+----
+1
+
+# -----------------------------------------------------------------------------
+# test: RETURNING clause is rejected at plan time
+#
+
+statement error
+INSERT INTO t VALUES (1000) RETURNING *;
+----
+RETURNING clause not yet supported for insertion into Delta table
+
+# state unchanged
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/insert_edge_cases/delta_lake/**/*.parquet')
+----
+1
+
+# -----------------------------------------------------------------------------
+# test: bare ON CONFLICT clause is rejected
+#
+# Note: with no UNIQUE / PRIMARY KEY constraint on the delta table, DuckDB's
+# binder rejects this BEFORE it reaches DeltaCatalog::PlanInsert (which has its
+# own ON CONFLICT guard at src/storage/delta_insert.cpp:373). The INSERT OR
+# REPLACE / OR IGNORE tests below cover the delta-side rejection path directly.
+#
+
+statement error
+INSERT INTO t VALUES (1000) ON CONFLICT DO NOTHING;
+----
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+# -----------------------------------------------------------------------------
+# test: INSERT OR REPLACE is rejected
+#
+# DuckDB lowers OR REPLACE to ON CONFLICT, which the binder rejects first
+# because the delta table has no UNIQUE / PRIMARY KEY constraint. The
+# delta-side guard at src/storage/delta_insert.cpp:373 is defensive — it would
+# only be reached if a delta table acquired UNIQUE/PK constraints, which the
+# current write surface does not allow.
+#
+
+statement error
+INSERT OR REPLACE INTO t VALUES (1000);
+----
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+10	45
+
+# -----------------------------------------------------------------------------
+# test: INSERT OR IGNORE is rejected (same binder path as OR REPLACE)
+#
+
+statement error
+INSERT OR IGNORE INTO t VALUES (1000);
+----
+
+# -----------------------------------------------------------------------------
+# test: explicit column-list INSERT works
+#
+
+statement ok
+INSERT INTO t (i) VALUES (42);
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+11	87
+
+# one new parquet file from this insert
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/insert_edge_cases/delta_lake/**/*.parquet')
+----
+2
+
+# -----------------------------------------------------------------------------
+# test: implicit widening cast INT -> BIGINT
+#
+
+statement ok
+INSERT INTO t SELECT 99::INTEGER;
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	186
+
+# -----------------------------------------------------------------------------
+# test: type mismatch (string into BIGINT) is rejected; no kernel-side write
+#
+
+statement error
+INSERT INTO t VALUES ('not a number');
+----
+
+# row count and file count unchanged
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	186
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/insert_edge_cases/delta_lake/**/*.parquet')
+----
+3
+
+# -----------------------------------------------------------------------------
+# test: wrong column count is rejected
+#
+
+statement error
+INSERT INTO t VALUES (1, 2);
+----
+
+query II
+SELECT count(*), sum(i) FROM t;
+----
+12	186
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/main/writing/insert_edge_cases/delta_lake/**/*.parquet')
+----
+3
+
+# -----------------------------------------------------------------------------
+# test: INSERT into a READ_ONLY attached delta table is rejected by DuckDB
+#
+
+statement ok
+DETACH t;
+
+statement ok
+ATTACH '__TEST_DIR__/main/writing/insert_edge_cases/delta_lake' AS ro_t (TYPE delta, READ_ONLY);
+
+statement error
+INSERT INTO ro_t VALUES (1);
+----
+
+query II
+SELECT count(*), sum(i) FROM ro_t;
+----
+12	186
+
+statement ok
+DETACH ro_t;
