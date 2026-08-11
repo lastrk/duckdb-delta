@@ -6,56 +6,30 @@ require parquet
 
 require delta
 
-# TODO: why does result checker fail?
-mode skip
-
 query I
-SELECT unnest(get_delta_test_expression())
+SELECT count(*) FROM unnest(get_delta_test_expression())
 ----
-col
-127
--128
-3.4028235e+38
--3.4028235e+38
-1.7976931348623157e+308
--1.7976931348623157e+308
-2147483647
--2147483648
-9223372036854775807
--9223372036854775808
-'hello expressions'
-true
-false
-'1970-01-01 00:00:00.00005+00'::TIMESTAMP WITH TIME ZONE
-'1970-01-01 00:00:00.0001'::TIMESTAMP
-'1970-02-02'::DATE
-'\x00\x00\xDE\xAD\xBE\xEF\xCA\xFE'::BLOB
-18446744073709551.617
-NULL
-struct_pack("'top'" := struct_pack("'a'" := 500, "'b'" := list_value(5, 0)))
-delta_kernel_transform_expression(delta_transform_op((is_insert = false), (field_name = 'dropme')), delta_transform_op(42, (is_insert = false), (field_name = 'replaceme')), delta_transform_op('first', (is_insert = true), (field_name = 'a')), delta_transform_op(delta_kernel_transform_expression(delta_transform_op((is_insert = false), (field_name = 'gone')), delta_transform_op('replaced', (is_insert = false), (field_name = 'stub')), delta_transform_op(false, (is_insert = true), (field_name = 'y')), delta_transform_op(true, (is_insert = true), (field_name = 'x'))), (is_insert = true), (field_name = 'a')), delta_transform_op('third', (is_insert = true), (field_name = 'a')), delta_transform_op('prepended', (is_insert = true), (field_name = NULL)), (input_path = "foo.bar.baz"))
-list_value(5, 0)
-{key1=val1, key2=val2}
-struct_pack(5, 20)
-delta_kernel_opaque_expression(42, 1.111)
-delta_kernel_unknown()
-(0 / 0)
-(0 * 0)
-(0 + 0)
-(0 - 0)
-col
-true
-false
-(10 IN (list_value(5, 0)))
-not((10 IN (list_value(5, 0))))
-((5 = 10) OR not((20 = 10)))
-not((col is NULL))
-delta_kernel_opaque_predicate(42, 1.111)
-delta_kernel_unknown()
-(0 = 0)
-not((0 = 0))
-(0 < 0)
-not((0 > 0))
-(0 > 0)
-not((0 < 0))
-(0 IS DISTINCT FROM 0)
+52
+
+# Check the v0.26 visitor callbacks that did not exist in the old expected output.
+query I
+SELECT count(*)
+FROM unnest(get_delta_test_expression()) AS expressions(value)
+WHERE value IN (
+    'delta_kernel_map_to_struct(pv)',
+    'COALESCE(col, 0)',
+    'list_value(1, 2)'
+)
+----
+3
+
+# Struct-patch field order is not stable. Check its required metadata instead.
+query IIII
+SELECT
+    count(*) FILTER (value LIKE 'delta_kernel_transform_expression%'),
+    count(*) FILTER (value LIKE '%(kind = ''prepend'')%'),
+    count(*) FILTER (value LIKE '%(kind = ''field'')%'),
+    count(*) FILTER (value LIKE '%(kind = ''append'')%')
+FROM unnest(get_delta_test_expression()) AS expressions(value)
+----
+3	1	1	1
