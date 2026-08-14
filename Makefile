@@ -62,6 +62,11 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 include benchmark/benchmark.Makefile
 
 LOADABLE_EXTENSION_TARGET=delta_loadable_extension
+PREBUILT_BUILD_DIR?=build/prebuilt-release
+
+ifeq ($(strip ${PREBUILT_BUILD_DIR}),)
+$(error PREBUILT_BUILD_DIR must not be empty)
+endif
 
 # Build only the loadable Delta artifact against the supplied official DuckDB
 # archive. This avoids both a DuckDB engine source build and unrelated targets.
@@ -69,13 +74,13 @@ LOADABLE_EXTENSION_TARGET=delta_loadable_extension
 prebuilt-release: ${EXTENSION_CONFIG_STEP}
 	@test -f "${DUCKDB_PREBUILT_LIBRARY}" || \
 		(echo "DUCKDB_PREBUILT_LIBRARY is missing: ${DUCKDB_PREBUILT_LIBRARY}" >&2; exit 1)
-	mkdir -p build/prebuilt-release
+	mkdir -p -- "${PREBUILT_BUILD_DIR}"
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_RELEASE_FLAGS) $(VCPKG_MANIFEST_FLAGS) \
 		-DPREBUILT_BINARY='$(abspath ${DUCKDB_PREBUILT_LIBRARY})' \
 		-DBUILD_EXTENSIONS_ONLY=1 -DDELTA_KERNEL_BUILD_ACCEPTANCE=OFF \
 		-DCMAKE_BUILD_TYPE=Release \
-		-S $(DUCKDB_SRCDIR) -B build/prebuilt-release
-	cmake --build build/prebuilt-release --config Release \
+		-S $(DUCKDB_SRCDIR) -B "${PREBUILT_BUILD_DIR}"
+	cmake --build "${PREBUILT_BUILD_DIR}" --config Release \
 		--target ${LOADABLE_EXTENSION_TARGET}
 
 # Generate some test data to test with
