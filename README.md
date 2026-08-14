@@ -98,7 +98,8 @@ DUCKDB_PREBUILT_LIBRARY=/path/to/libduckdb_static.a make prebuilt-release
 ```
 
 The named target builds only `delta_loadable_extension`. The archive must match
-the version and platform of the `duckdb` submodule.
+the version and platform of the `duckdb` submodule. This artifact target skips
+the acceptance DAT generator, which is only an input to the SQLLogicTest suite.
 
 By default, the build clones the exact `delta-kernel-rs` commit configured in
 `CMakeLists.txt`. To develop against a local checkout, set

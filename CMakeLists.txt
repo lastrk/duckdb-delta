@@ -178,6 +178,37 @@ set(DELTA_KERNEL_FFI_HEADER_PATCHED
 # Cargo optimization/debug symbol flags
 set(CARGO_PROFILE "$<IF:$<CONFIG:Debug>,dev,release>")
 
+option(DELTA_KERNEL_BUILD_ACCEPTANCE
+       "Build delta-kernel acceptance DATs for the SQLLogicTest suite" ON)
+set(DELTA_KERNEL_ACCEPTANCE_COMMANDS)
+if(DELTA_KERNEL_BUILD_ACCEPTANCE)
+  # acceptance depends on delta_kernel_benchmarks (a regular dependency), whose
+  # build.rs downloads benchmark data that the extension tests do not use.
+  list(
+    APPEND
+    DELTA_KERNEL_ACCEPTANCE_COMMANDS
+    COMMAND
+    ${CMAKE_COMMAND}
+    -E
+    make_directory
+    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads"
+    COMMAND
+    ${CMAKE_COMMAND}
+    -E
+    touch
+    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads/.done"
+    COMMAND
+    ${CMAKE_COMMAND}
+    -E
+    env
+    ${RUST_UNSET_ENV_VARS}
+    ${RUST_ENV_VARS}
+    "CARGO_TARGET_DIR=${DELTA_KERNEL_CARGO_TARGET_DIR}"
+    cargo
+    build
+    "--manifest-path=${DELTA_KERNEL_SOURCE_DIR}/acceptance/Cargo.toml")
+endif()
+
 # Add rust_example as a CMake target
 ExternalProject_Add(
   ${KERNEL_NAME}
@@ -195,17 +226,7 @@ ExternalProject_Add(
       --package delta_kernel_ffi --profile=${CARGO_PROFILE}
       --features "default-engine-rustls,arrow,test-ffi,delta-kernel-unity-catalog,tracing"
       ${RUST_PLATFORM_PARAM}
-  # acceptance depends on delta_kernel_benchmarks (regular dep, not dev), whose build.rs
-  # downloads benchmark workload data we don't need. Pre-create the .done marker to skip it.
-  COMMAND ${CMAKE_COMMAND} -E make_directory
-    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads"
-  COMMAND ${CMAKE_COMMAND} -E touch
-    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads/.done"
-  # Build DATs
-  COMMAND
-    ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS} ${RUST_ENV_VARS}
-      "CARGO_TARGET_DIR=${DELTA_KERNEL_CARGO_TARGET_DIR}" cargo build
-      --manifest-path=${DELTA_KERNEL_SOURCE_DIR}/acceptance/Cargo.toml
+  ${DELTA_KERNEL_ACCEPTANCE_COMMANDS}
   # Copy, patch, and generate the C++ FFI header into codegen/include/.
   # See scripts/ffi/generate_delta_kernel_ffi_header and cbindgen#402 for details.
   COMMAND

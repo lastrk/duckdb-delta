@@ -72,7 +72,8 @@ prebuilt-release: ${EXTENSION_CONFIG_STEP}
 	mkdir -p build/prebuilt-release
 	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_RELEASE_FLAGS) $(VCPKG_MANIFEST_FLAGS) \
 		-DPREBUILT_BINARY='$(abspath ${DUCKDB_PREBUILT_LIBRARY})' \
-		-DBUILD_EXTENSIONS_ONLY=1 -DCMAKE_BUILD_TYPE=Release \
+		-DBUILD_EXTENSIONS_ONLY=1 -DDELTA_KERNEL_BUILD_ACCEPTANCE=OFF \
+		-DCMAKE_BUILD_TYPE=Release \
 		-S $(DUCKDB_SRCDIR) -B build/prebuilt-release
 	cmake --build build/prebuilt-release --config Release \
 		--target ${LOADABLE_EXTENSION_TARGET}
