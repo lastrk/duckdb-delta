@@ -65,6 +65,14 @@ endif()
 # Setup delta-kernel-rs dependency
 set(KERNEL_NAME delta_kernel)
 
+set(DELTA_KERNEL_GIT_REPOSITORY
+    "https://github.com/lastrk/delta-kernel-rs.git")
+set(DELTA_KERNEL_GIT_COMMIT
+    "b14b4b854af636d4b94d048ebafa7a21048084c9")
+set(DELTA_KERNEL_LOCAL_DIR
+    ""
+    CACHE PATH "Use a local delta-kernel-rs checkout instead of cloning")
+
 # Set default ExternalProject root directory
 set_directory_properties(PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/rust)
 
@@ -79,12 +87,15 @@ if("${OS_NAME}" STREQUAL "linux")
     set(RUST_PLATFORM_TARGET "x86_64-unknown-linux-gnu")
   endif()
 
-  # Point Rust openssl-sys at vcpkg OpenSSL and force static linking
-  set(RUST_ENV_VARS
-      ${RUST_ENV_VARS}
-      OPENSSL_STATIC=1
-      OPENSSL_LIB_DIR=${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib
-      OPENSSL_INCLUDE_DIR=${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include)
+  # Point Rust openssl-sys at vcpkg OpenSSL when vcpkg supplies it. Native
+  # prebuilt builds use the platform OpenSSL installation.
+  if(VCPKG_BUILD)
+    set(RUST_ENV_VARS
+        ${RUST_ENV_VARS}
+        OPENSSL_STATIC=1
+        OPENSSL_LIB_DIR=${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/lib
+        OPENSSL_INCLUDE_DIR=${CMAKE_BINARY_DIR}/vcpkg_installed/${VCPKG_TARGET_TRIPLET}/include)
+  endif()
 elseif("${OS_NAME}" STREQUAL "osx")
   if("${OSX_BUILD_ARCH}" STREQUAL "arm64")
     set(RUST_PLATFORM_TARGET "aarch64-apple-darwin")
@@ -120,19 +131,44 @@ string(STRIP "${RUST_ENV_VARS}" RUST_ENV_VARS)
 set(RUST_UNSET_ENV_VARS --unset=CC --unset=CXX --unset=LD)
 
 # Define all the relevant delta-kernel-rs paths/names
+if(DELTA_KERNEL_LOCAL_DIR)
+  get_filename_component(DELTA_KERNEL_SOURCE_DIR "${DELTA_KERNEL_LOCAL_DIR}"
+                         ABSOLUTE)
+  if(NOT EXISTS "${DELTA_KERNEL_SOURCE_DIR}/Cargo.toml")
+    message(
+      FATAL_ERROR
+        "DELTA_KERNEL_LOCAL_DIR does not contain a Cargo.toml: ${DELTA_KERNEL_SOURCE_DIR}"
+    )
+  endif()
+  set(DELTA_KERNEL_DOWNLOAD_ARGS
+      SOURCE_DIR "${DELTA_KERNEL_SOURCE_DIR}"
+      DOWNLOAD_COMMAND "")
+  message(STATUS "Using local delta-kernel-rs checkout: ${DELTA_KERNEL_SOURCE_DIR}")
+else()
+  set(DELTA_KERNEL_SOURCE_DIR
+      "${CMAKE_BINARY_DIR}/rust/src/delta_kernel")
+  set(DELTA_KERNEL_DOWNLOAD_ARGS
+      GIT_REPOSITORY "${DELTA_KERNEL_GIT_REPOSITORY}"
+      GIT_TAG "${DELTA_KERNEL_GIT_COMMIT}")
+  message(STATUS "Using delta-kernel-rs commit: ${DELTA_KERNEL_GIT_COMMIT}")
+endif()
+
+set(DELTA_KERNEL_CARGO_TARGET_DIR
+    "${CMAKE_BINARY_DIR}/rust/target"
+    CACHE PATH "Cargo target directory for delta-kernel-rs")
 set(DELTA_KERNEL_LIBNAME
     "${CMAKE_STATIC_LIBRARY_PREFIX}delta_kernel_ffi${CMAKE_STATIC_LIBRARY_SUFFIX}"
 )
 set(DELTA_KERNEL_LIBPATH
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/target/${RUST_PLATFORM_TARGET}/$<IF:$<CONFIG:Debug>,debug,release>/${DELTA_KERNEL_LIBNAME}"
+    "${DELTA_KERNEL_CARGO_TARGET_DIR}/${RUST_PLATFORM_TARGET}/$<IF:$<CONFIG:Debug>,debug,release>/${DELTA_KERNEL_LIBNAME}"
 )
 set(DELTA_KERNEL_FFI_HEADER_PATH
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/target/ffi-headers")
+    "${DELTA_KERNEL_CARGO_TARGET_DIR}/ffi-headers")
 set(DELTA_KERNEL_FFI_HEADER_C
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/target/ffi-headers/delta_kernel_ffi.h"
+    "${DELTA_KERNEL_CARGO_TARGET_DIR}/ffi-headers/delta_kernel_ffi.h"
 )
 set(DELTA_KERNEL_FFI_HEADER_CXX
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/target/ffi-headers/delta_kernel_ffi.hpp"
+    "${DELTA_KERNEL_CARGO_TARGET_DIR}/ffi-headers/delta_kernel_ffi.hpp"
 )
 
 set(DELTA_KERNEL_FFI_HEADER_PATCHED
@@ -145,8 +181,7 @@ set(CARGO_PROFILE "$<IF:$<CONFIG:Debug>,dev,release>")
 # Add rust_example as a CMake target
 ExternalProject_Add(
   ${KERNEL_NAME}
-  GIT_REPOSITORY "https://github.com/delta-io/delta-kernel-rs"
-  GIT_TAG v0.26.0
+  ${DELTA_KERNEL_DOWNLOAD_ARGS}
   # Prints the env variables passed to the cargo build to the terminal, useful
   # in debugging because passing them through CMake is an error-prone mess
   CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS}
@@ -155,20 +190,22 @@ ExternalProject_Add(
   BUILD_IN_SOURCE 1
   # Build debug build
   BUILD_COMMAND
-    ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS} ${RUST_ENV_VARS} cargo build
+    ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS} ${RUST_ENV_VARS}
+      "CARGO_TARGET_DIR=${DELTA_KERNEL_CARGO_TARGET_DIR}" cargo build
       --package delta_kernel_ffi --profile=${CARGO_PROFILE}
       --features "default-engine-rustls,arrow,test-ffi,delta-kernel-unity-catalog,tracing"
       ${RUST_PLATFORM_PARAM}
   # acceptance depends on delta_kernel_benchmarks (regular dep, not dev), whose build.rs
   # downloads benchmark workload data we don't need. Pre-create the .done marker to skip it.
   COMMAND ${CMAKE_COMMAND} -E make_directory
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/benchmarks/workloads"
+    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads"
   COMMAND ${CMAKE_COMMAND} -E touch
-    "${CMAKE_BINARY_DIR}/rust/src/delta_kernel/benchmarks/workloads/.done"
+    "${DELTA_KERNEL_SOURCE_DIR}/benchmarks/workloads/.done"
   # Build DATs
   COMMAND
-    ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS} ${RUST_ENV_VARS} cargo build
-      --manifest-path=${CMAKE_BINARY_DIR}/rust/src/delta_kernel/acceptance/Cargo.toml
+    ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS} ${RUST_ENV_VARS}
+      "CARGO_TARGET_DIR=${DELTA_KERNEL_CARGO_TARGET_DIR}" cargo build
+      --manifest-path=${DELTA_KERNEL_SOURCE_DIR}/acceptance/Cargo.toml
   # Copy, patch, and generate the C++ FFI header into codegen/include/.
   # See scripts/ffi/generate_delta_kernel_ffi_header and cbindgen#402 for details.
   COMMAND

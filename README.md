@@ -90,6 +90,24 @@ regular parquet scanning logic:
 
 ## Building
 
+To build against an official DuckDB static archive without compiling DuckDB
+core, set `DUCKDB_PREBUILT_LIBRARY`:
+
+```shell
+DUCKDB_PREBUILT_LIBRARY=/path/to/libduckdb_static.a make prebuilt-release
+```
+
+The named target builds only `delta_loadable_extension`. The archive must match
+the version and platform of the `duckdb` submodule.
+
+By default, the build clones the exact `delta-kernel-rs` commit configured in
+`CMakeLists.txt`. To develop against a local checkout, set
+`DELTA_KERNEL_LOCAL_DIR`:
+
+```shell
+DELTA_KERNEL_LOCAL_DIR=/path/to/delta-kernel-rs make release
+```
+
 See the [Extension Template](https://github.com/duckdb/extension-template) for generic build instructions
 
 ## Running tests

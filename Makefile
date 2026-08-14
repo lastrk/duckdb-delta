@@ -15,12 +15,30 @@ ifneq ("${CUSTOM_LINKER}", "")
 	EXT_DEBUG_FLAGS:=${EXT_DEBUG_FLAGS} -DCUSTOM_LINKER=${CUSTOM_LINKER}
 endif
 
-# Set test paths
-test_release: export DELTA_KERNEL_TESTS_PATH=./build/release/rust/src/delta_kernel/kernel/tests/data
-test_release: export DAT_PATH=./build/release/rust/src/delta_kernel/acceptance/tests/dat
+# Build against the official DuckDB static archive without compiling DuckDB
+# core. The DuckDB source submodule still supplies headers and build metadata.
+ifneq ("${DUCKDB_PREBUILT_LIBRARY}", "")
+ifeq ("$(wildcard ${DUCKDB_PREBUILT_LIBRARY})", "")
+$(error DUCKDB_PREBUILT_LIBRARY does not exist: ${DUCKDB_PREBUILT_LIBRARY})
+endif
+EXT_FLAGS:=${EXT_FLAGS} -DPREBUILT_BINARY='$(abspath ${DUCKDB_PREBUILT_LIBRARY})' -DBUILD_EXTENSIONS_ONLY=1
+BUILD_EXTENSION_TEST_DEPS?=none
+endif
 
-test_debug: export DELTA_KERNEL_TESTS_PATH=./build/debug/rust/src/delta_kernel/kernel/tests/data
-test_debug: export DAT_PATH=./build/debug/rust/src/delta_kernel/acceptance/tests/dat
+ifneq ("${DELTA_KERNEL_LOCAL_DIR}", "")
+ifeq ("$(wildcard ${DELTA_KERNEL_LOCAL_DIR}/Cargo.toml)", "")
+$(error DELTA_KERNEL_LOCAL_DIR does not contain Cargo.toml: ${DELTA_KERNEL_LOCAL_DIR})
+endif
+DELTA_KERNEL_SOURCE_DIR:=$(abspath ${DELTA_KERNEL_LOCAL_DIR})
+EXT_FLAGS:=${EXT_FLAGS} -DDELTA_KERNEL_LOCAL_DIR='${DELTA_KERNEL_SOURCE_DIR}'
+endif
+
+# Set test paths
+test_release: export DELTA_KERNEL_TESTS_PATH=$(if ${DELTA_KERNEL_SOURCE_DIR},${DELTA_KERNEL_SOURCE_DIR},./build/release/rust/src/delta_kernel)/kernel/tests/data
+test_release: export DAT_PATH=$(if ${DELTA_KERNEL_SOURCE_DIR},${DELTA_KERNEL_SOURCE_DIR},./build/release/rust/src/delta_kernel)/acceptance/tests/dat
+
+test_debug: export DELTA_KERNEL_TESTS_PATH=$(if ${DELTA_KERNEL_SOURCE_DIR},${DELTA_KERNEL_SOURCE_DIR},./build/debug/rust/src/delta_kernel)/kernel/tests/data
+test_debug: export DAT_PATH=$(if ${DELTA_KERNEL_SOURCE_DIR},${DELTA_KERNEL_SOURCE_DIR},./build/debug/rust/src/delta_kernel)/acceptance/tests/dat
 
 # Core extensions that we need for crucial testing
 DEFAULT_TEST_EXTENSION_DEPS=tpcds;tpch;json;
@@ -42,6 +60,22 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # Include the Makefile from the benchmark directory
 include benchmark/benchmark.Makefile
+
+LOADABLE_EXTENSION_TARGET=delta_loadable_extension
+
+# Build only the loadable Delta artifact against the supplied official DuckDB
+# archive. This avoids both a DuckDB engine source build and unrelated targets.
+.PHONY: prebuilt-release
+prebuilt-release: ${EXTENSION_CONFIG_STEP}
+	@test -f "${DUCKDB_PREBUILT_LIBRARY}" || \
+		(echo "DUCKDB_PREBUILT_LIBRARY is missing: ${DUCKDB_PREBUILT_LIBRARY}" >&2; exit 1)
+	mkdir -p build/prebuilt-release
+	cmake $(GENERATOR) $(BUILD_FLAGS) $(EXT_RELEASE_FLAGS) $(VCPKG_MANIFEST_FLAGS) \
+		-DPREBUILT_BINARY='$(abspath ${DUCKDB_PREBUILT_LIBRARY})' \
+		-DBUILD_EXTENSIONS_ONLY=1 -DCMAKE_BUILD_TYPE=Release \
+		-S $(DUCKDB_SRCDIR) -B build/prebuilt-release
+	cmake --build build/prebuilt-release --config Release \
+		--target ${LOADABLE_EXTENSION_TARGET}
 
 # Generate some test data to test with
 # Note: make sure the JAVA_HOME var is set correctly and a venv is configured, e.g:
