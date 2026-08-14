@@ -4,6 +4,7 @@
 
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/path.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -24,24 +25,6 @@
 #include "duckdb/planner/constraints/bound_not_null_constraint.hpp"
 
 namespace duckdb {
-
-static string url_decode(string input) {
-	string result;
-	result.reserve(input.size());
-	char ch;
-	for (idx_t i = 0; i < input.length(); i++) {
-		if (int(input[i]) == 37) {
-			unsigned int ii;
-			sscanf(input.substr(i + 1, 2).c_str(), "%x", &ii);
-			ch = static_cast<char>(ii);
-			result += ch;
-			i += 2;
-		} else {
-			result += input[i];
-		}
-	}
-	return result;
-}
 
 static string ParseAccountNameFromEndpoint(const string &endpoint) {
 	if (!StringUtil::StartsWith(endpoint, "https://")) {
@@ -452,13 +435,13 @@ void ScanDataCallBack::VisitCallbackInternal(ffi::NullableCvoid engine_context, 
 
 	auto path_string = snapshot.GetPath();
 	auto sub_path = KernelUtils::FromDeltaString(path);
-	if (StringUtil::StartsWith(sub_path, "/") && sub_path.find('/', 1) != std::string::npos) {
-		path_string = sub_path;
+	auto decoded_sub_path = StringUtil::URLDecode(sub_path);
+	if (Path::FromString(sub_path).IsAbsolute()) {
+		path_string = decoded_sub_path;
 	} else {
 		StringUtil::RTrim(path_string, "/");
-		path_string += "/" + sub_path;
+		path_string += "/" + decoded_sub_path;
 	}
-	path_string = url_decode(path_string);
 
 	// First we append the file to our resolved files
 	snapshot.resolved_files.emplace_back(DeltaMultiFileList::ToDuckDBPath(path_string));

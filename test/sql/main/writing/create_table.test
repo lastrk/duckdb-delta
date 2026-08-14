@@ -180,6 +180,51 @@ SELECT * FROM mixed.mixed;
 ----
 1	eu
 
+# The scan must decode URI-encoded add paths without decoding the table root.
+statement ok
+ATTACH '{TEMP_DIR}/delta path #hash %percent apostrophe''s' AS special_path (TYPE delta);
+
+statement ok
+CREATE TABLE special_path.special_path (id INTEGER);
+
+statement ok
+INSERT INTO special_path.special_path VALUES (42);
+
+statement ok
+DETACH special_path;
+
+query I
+SELECT * FROM delta_scan('{TEMP_DIR}/delta path #hash %percent apostrophe''s');
+----
+42
+
+# Relative add paths are decoded after they are classified.
+statement ok
+COPY (SELECT 43 AS id) TO '{TEMP_DIR}/delta path #hash %percent apostrophe''s/encoded name.parquet' (FORMAT parquet);
+
+# Absolute add paths must not be joined to the table root.
+statement ok
+COPY (SELECT 44 AS id) TO '{TEMP_DIR}/delta-absolute-add.parquet' (FORMAT parquet);
+
+# Malformed percent text must not cause unsafe decoding.
+statement ok
+COPY (SELECT 45 AS id) TO '{TEMP_DIR}/delta path #hash %percent apostrophe''s/malformed%name.parquet' (FORMAT parquet);
+
+statement ok
+COPY (VALUES
+    ('{"add":{"path":"%2Fencoded%20name.parquet","partitionValues":{},"size":0,"modificationTime":0,"dataChange":true}}'),
+    ('{"add":{"path":"file://{WORKING_DIR}/{TEMP_DIR}/delta-absolute-add.parquet","partitionValues":{},"size":0,"modificationTime":0,"dataChange":true}}'),
+    ('{"add":{"path":"malformed%name.parquet","partitionValues":{},"size":0,"modificationTime":0,"dataChange":true}}')
+) TO '{TEMP_DIR}/delta path #hash %percent apostrophe''s/_delta_log/00000000000000000001.json'
+  (FORMAT CSV, HEADER FALSE, QUOTE '', ESCAPE '');
+
+query I
+SELECT id FROM delta_scan('{TEMP_DIR}/delta path #hash %percent apostrophe''s') WHERE id >= 43 ORDER BY id;
+----
+43
+44
+45
+
 query II
 SELECT column_name, data_type FROM duckdb_columns() WHERE table_name = 'MiXeD' ORDER BY column_index;
 ----
