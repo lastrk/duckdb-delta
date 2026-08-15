@@ -216,10 +216,7 @@ endif()
 ExternalProject_Add(
   ${KERNEL_NAME}
   ${DELTA_KERNEL_DOWNLOAD_ARGS}
-  # Prints the env variables passed to the cargo build to the terminal, useful
-  # in debugging because passing them through CMake is an error-prone mess
-  CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env ${RUST_UNSET_ENV_VARS}
-                    ${RUST_ENV_VARS} env
+  CONFIGURE_COMMAND ""
   UPDATE_COMMAND ""
   BUILD_IN_SOURCE 1
   # Build debug build
