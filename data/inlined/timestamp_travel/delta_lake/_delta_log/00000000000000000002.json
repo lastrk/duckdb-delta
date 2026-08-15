@@ -1,0 +1,2 @@
+{"commitInfo":{"timestamp":1700000002000,"inCommitTimestamp":1700000002000,"operation":"WRITE","operationParameters":{"mode":"Append"},"isolationLevel":"Serializable","isBlindAppend":true}}
+{"add":{"path":"part-00002.snappy.parquet","partitionValues":{},"size":0,"modificationTime":1700000002000,"dataChange":true,"stats":"{\"numRecords\":1,\"minValues\":{\"i\":11},\"maxValues\":{\"i\":11},\"nullCount\":{\"i\":0}}"}}

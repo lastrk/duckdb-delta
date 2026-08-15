@@ -824,11 +824,44 @@ void DeltaMultiFileList::InitializeSnapshot() const {
 		}
 		snapshot = make_shared_ptr<SharedKernelSnapshot>(BuildSnapshot(builder));
 
-		auto snapshot_ref = snapshot->GetLockingRef();
-		if (version == DConstants::INVALID_INDEX) {
-			this->version = ffi::version(snapshot_ref.GetPtr());
-		} else if (ffi::version(snapshot_ref.GetPtr()) != version) {
-			throw InvalidInputException("Snapshot version does not match requested version");
+		idx_t snapshot_version;
+		if (has_requested_timestamp) {
+			idx_t resolved_version;
+			{
+				auto snapshot_ref = snapshot->GetLockingRef();
+				snapshot_version = ffi::version(snapshot_ref.GetPtr());
+				auto latest_timestamp = TryUnpackKernelResult(
+				    ffi::snapshot_timestamp(snapshot_ref.GetPtr(), extern_engine.get()));
+				if (requested_timestamp_ms > latest_timestamp) {
+					throw InvalidInputException("The provided timestamp is after the latest Delta commit");
+				}
+				auto commit = TryUnpackKernelResult(ffi::latest_version_as_of(
+				    snapshot_ref.GetPtr(), extern_engine.get(), requested_timestamp_ms,
+				    ffi::FfiHistoryCommitType::Recreatable));
+				resolved_version = commit.version;
+			}
+
+			if (resolved_version != snapshot_version) {
+				builder = TryUnpackKernelResult(ffi::get_snapshot_builder(path_slice, extern_engine.get()));
+				ffi::snapshot_builder_set_version(&builder, resolved_version);
+				if (delta_log_path) {
+					TryUnpackKernelResult(ffi::snapshot_builder_set_log_tail(&builder, delta_log_path->GetFFIPtr()));
+				}
+				if (max_catalog_version >= 0) {
+					ffi::snapshot_builder_set_max_catalog_version(&builder,
+					                                              static_cast<uint64_t>(max_catalog_version));
+				}
+				snapshot = make_shared_ptr<SharedKernelSnapshot>(BuildSnapshot(builder));
+			}
+			this->version = resolved_version;
+		} else {
+			auto snapshot_ref = snapshot->GetLockingRef();
+			snapshot_version = ffi::version(snapshot_ref.GetPtr());
+			if (version == DConstants::INVALID_INDEX) {
+				this->version = snapshot_version;
+			} else if (snapshot_version != version) {
+				throw InvalidInputException("Snapshot version does not match requested version");
+			}
 		}
 	}
 
@@ -1173,7 +1206,22 @@ void DeltaMultiFileList::PinVersion(idx_t v) {
 	if (initialized_snapshot) {
 		throw InternalException("DeltaMultiFileList::PinVersion called after the snapshot was initialized");
 	}
+	if (has_requested_timestamp) {
+		throw InternalException("DeltaMultiFileList cannot pin both a version and a timestamp");
+	}
 	version = v;
+}
+
+void DeltaMultiFileList::PinTimestampMs(int64_t timestamp_ms) {
+	unique_lock<mutex> lck(lock);
+	if (initialized_snapshot) {
+		throw InternalException("DeltaMultiFileList::PinTimestampMs called after the snapshot was initialized");
+	}
+	if (version != DConstants::INVALID_INDEX) {
+		throw InternalException("DeltaMultiFileList cannot pin both a version and a timestamp");
+	}
+	has_requested_timestamp = true;
+	requested_timestamp_ms = timestamp_ms;
 }
 
 DeltaFileMetaData &DeltaMultiFileList::GetMetaData(idx_t index) const {

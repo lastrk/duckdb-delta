@@ -112,8 +112,13 @@ bool DeltaMultiFileReader::Bind(MultiFileOptions &options, MultiFileList &files,
 	// to DeltaMultiFileList's constructor. Transfer it here, before delta_snapshot.Bind() triggers
 	// snapshot initialization. If a snapshot was injected via function_info (catalog-driven path),
 	// `snapshot` is non-null and PinVersion would have nothing to do, so we skip it.
-	if (!snapshot && requested_version != DConstants::INVALID_INDEX) {
-		delta_snapshot.PinVersion(requested_version);
+	if (!snapshot) {
+		if (requested_version != DConstants::INVALID_INDEX) {
+			delta_snapshot.PinVersion(requested_version);
+		}
+		if (has_requested_timestamp) {
+			delta_snapshot.PinTimestampMs(requested_timestamp_ms);
+		}
 	}
 
 	delta_snapshot.Bind(return_types, names);
@@ -303,7 +308,21 @@ bool DeltaMultiFileReader::ParseOption(const string &key, const Value &val, Mult
 	}
 
 	if (loption == "version") {
+		if (has_requested_timestamp) {
+			throw InvalidInputException("delta_scan accepts either version or timestamp_ms, not both");
+		}
 		requested_version = val.DefaultCastAs(LogicalType::UBIGINT).GetValue<idx_t>();
+		return true;
+	}
+	if (loption == "timestamp_ms") {
+		if (requested_version != DConstants::INVALID_INDEX) {
+			throw InvalidInputException("delta_scan accepts either version or timestamp_ms, not both");
+		}
+		if (val.IsNull()) {
+			throw InvalidInputException("delta_scan timestamp_ms must not be NULL");
+		}
+		requested_timestamp_ms = val.DefaultCastAs(LogicalType::BIGINT).GetValue<int64_t>();
+		has_requested_timestamp = true;
 		return true;
 	}
 

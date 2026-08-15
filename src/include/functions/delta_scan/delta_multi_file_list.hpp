@@ -100,6 +100,8 @@ public:
 	//! Pin a specific version on a not-yet-initialized snapshot. Must be called before any operation
 	//! that would trigger InitializeSnapshot (e.g. Bind, GetAllFiles).
 	void PinVersion(idx_t v);
+	//! Pin the latest recreatable version at or before a timestamp in Unix epoch milliseconds.
+	void PinTimestampMs(int64_t timestamp_ms);
 	vector<string> GetPartitionColumns();
 
 	vector<DeltaMultiFileColumnDefinition> &GetLazyLoadedGlobalColumns() const;
@@ -148,6 +150,8 @@ protected:
 	//       const, but not physically.
 	mutable mutex lock;
 	mutable idx_t version;
+	mutable bool has_requested_timestamp = false;
+	mutable int64_t requested_timestamp_ms = 0;
 
 	//! Delta Kernel Structures
 	mutable shared_ptr<SharedKernelSnapshot> old_snapshot;

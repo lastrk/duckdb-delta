@@ -1,0 +1,85 @@
+# name: test/sql/main/delta_scan_timestamp.test
+# description: Test Delta timestamp time travel through an epoch-millisecond parameter
+# group: [delta]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+FROM copy_dir('data/inlined/timestamp_travel', '__TEST_DIR__/main/delta_scan_timestamp');
+
+statement ok
+COPY (SELECT i FROM range(10) t(i)) TO '__TEST_DIR__/main/delta_scan_timestamp/delta_lake/part-00000.snappy.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 10::BIGINT AS i) TO '__TEST_DIR__/main/delta_scan_timestamp/delta_lake/part-00001.snappy.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 11::BIGINT AS i) TO '__TEST_DIR__/main/delta_scan_timestamp/delta_lake/part-00002.snappy.parquet' (FORMAT parquet);
+
+# A timestamp between v1 and v2 resolves and rebuilds the v1 snapshot.
+query I
+SELECT i FROM delta_scan(
+    '__TEST_DIR__/main/delta_scan_timestamp/delta_lake',
+    timestamp_ms = 1700000001500
+) ORDER BY i;
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+
+# An exact timestamp at the current commit reuses the HEAD snapshot.
+query I
+SELECT i FROM delta_scan(
+    '__TEST_DIR__/main/delta_scan_timestamp/delta_lake',
+    timestamp_ms = 1700000002000
+) ORDER BY i;
+----
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+
+# The two time-travel selectors are mutually exclusive.
+statement error
+SELECT count() FROM delta_scan(
+    '__TEST_DIR__/main/delta_scan_timestamp/delta_lake',
+    version => 1,
+    timestamp_ms = 1700000001500
+);
+----
+
+# A timestamp after the latest commit is rejected.
+statement error
+SELECT count() FROM delta_scan(
+    '__TEST_DIR__/main/delta_scan_timestamp/delta_lake',
+    timestamp_ms = 1700000002001
+);
+----
+
+# A timestamp before the earliest retained commit is rejected.
+statement error
+SELECT count() FROM delta_scan(
+    '__TEST_DIR__/main/delta_scan_timestamp/delta_lake',
+    timestamp_ms = 1699999999999
+);
+----
