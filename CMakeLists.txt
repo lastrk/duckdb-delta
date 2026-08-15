@@ -180,6 +180,9 @@ set(CARGO_PROFILE "$<IF:$<CONFIG:Debug>,dev,release>")
 
 option(DELTA_KERNEL_BUILD_ACCEPTANCE
        "Build delta-kernel acceptance DATs for the SQLLogicTest suite" ON)
+option(DELTA_KERNEL_BUILD_ALWAYS
+       "Run the delta-kernel Cargo build whenever the extension target builds"
+       OFF)
 set(DELTA_KERNEL_ACCEPTANCE_COMMANDS)
 if(DELTA_KERNEL_BUILD_ACCEPTANCE)
   # acceptance depends on delta_kernel_benchmarks (a regular dependency), whose
@@ -238,6 +241,7 @@ ExternalProject_Add(
   BUILD_BYPRODUCTS "${DELTA_KERNEL_LIBPATH}"
   BUILD_BYPRODUCTS "${DELTA_KERNEL_FFI_HEADER_C}"
   BUILD_BYPRODUCTS "${DELTA_KERNEL_FFI_HEADER_CXX}"
+  BUILD_ALWAYS ${DELTA_KERNEL_BUILD_ALWAYS}
   INSTALL_COMMAND ""
   LOG_BUILD ON)
 
