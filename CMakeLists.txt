@@ -68,7 +68,7 @@ set(KERNEL_NAME delta_kernel)
 set(DELTA_KERNEL_GIT_REPOSITORY
     "https://github.com/lastrk/delta-kernel-rs.git")
 set(DELTA_KERNEL_GIT_COMMIT
-    "b14b4b854af636d4b94d048ebafa7a21048084c9")
+    "a9759e044cabe06c7342a4d319ec20fd2a4ba1a3")
 set(DELTA_KERNEL_LOCAL_DIR
     ""
     CACHE PATH "Use a local delta-kernel-rs checkout instead of cloning")
