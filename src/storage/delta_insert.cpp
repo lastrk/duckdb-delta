@@ -151,6 +151,23 @@ static DeltaColumnStats ParseColumnStats(const vector<Value> col_stats) {
 	return column_stats;
 }
 
+static bool SupportsDeltaStatsPath(const LogicalType &type, const vector<string> &column_names, idx_t offset) {
+	if (type.id() == LogicalTypeId::VARIANT || type.id() == LogicalTypeId::LIST || type.id() == LogicalTypeId::MAP) {
+		return false;
+	}
+	if (type.id() != LogicalTypeId::STRUCT || offset >= column_names.size()) {
+		return true;
+	}
+
+	for (const auto &child : StructType::GetChildTypes(type)) {
+		if (child.first == column_names[offset]) {
+			return SupportsDeltaStatsPath(child.second, column_names, offset + 1);
+		}
+	}
+	// Preserve the existing invalid-path diagnostic in ParseInnerType.
+	return true;
+}
+
 static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chunk) {
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		DeltaDataFile data_file;
@@ -205,8 +222,8 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 				}
 			}
 
-			// Skip types whose stats we don't yet support
-			if (coltype.id() == LogicalTypeId::VARIANT || coltype.id() == LogicalTypeId::LIST) {
+			// Delta min/max statistics do not support arrays, maps, or variants.
+			if (!SupportsDeltaStatsPath(coltype, column_names, 1)) {
 				continue;
 			}
 

@@ -1,0 +1,31 @@
+# name: test/sql/main/writing/map_append.test
+# description: Map values can be appended without unsupported min/max statistics
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '{TEMP_DIR}/map_append' AS map_append (TYPE delta);
+
+statement ok
+CREATE TABLE map_append.map_append (
+    id BIGINT,
+    metrics MAP(VARCHAR, INTEGER),
+    payload STRUCT(metrics MAP(VARCHAR, INTEGER))
+);
+
+statement ok
+INSERT INTO map_append.map_append VALUES (
+    1,
+    MAP {'base': 100},
+    {'metrics': MAP {'nested': 200}}
+);
+
+query III
+SELECT id, metrics['base'], payload.metrics['nested'] FROM map_append.map_append;
+----
+1	100	200
