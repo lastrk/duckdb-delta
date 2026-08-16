@@ -18,6 +18,7 @@ class DeltaTableEntry;
 class DeltaMultiFileList;
 struct DeltaDataFile;
 struct DeltaMultiFileColumnDefinition;
+class ColumnList;
 
 enum class DeltaTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -31,13 +32,14 @@ public:
 	void Rollback();
 
 	void Append(ClientContext &context, const vector<DeltaDataFile> &append_files);
+	void AddColumns(ClientContext &context, const ColumnList &new_columns);
 
 	void SetTransactionVersion(const string &app_id, idx_t new_version, Value expected_value);
 
 	static DeltaTransaction &Get(ClientContext &context, Catalog &catalog);
 	AccessMode GetAccessMode() const;
 
-	bool HasOutstandingAppends() const;
+	bool HasOutstandingChanges() const;
 
 	optional_ptr<DeltaTableEntry> GetTableEntry(idx_t version);
 
@@ -78,6 +80,7 @@ private:
 	const AccessMode access_mode;
 
 	vector<DeltaDataFile> outstanding_appends;
+	bool has_schema_changes = false;
 
 	KernelExclusiveTransaction kernel_transaction;
 

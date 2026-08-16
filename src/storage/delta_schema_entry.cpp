@@ -20,10 +20,13 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/parsed_data/create_index_info.hpp"
+#include "duckdb/parser/parsed_data/alter_table_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/planner/tableref/bound_at_clause.hpp"
+
+#include <algorithm>
 
 namespace duckdb {
 
@@ -315,7 +318,42 @@ optional_ptr<CatalogEntry> DeltaSchemaEntry::CreateCollation(CatalogTransaction 
 }
 
 void DeltaSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
-	throw NotImplementedException("Delta tables do not support altering");
+	if (!transaction.HasContext()) {
+		throw NotImplementedException("Can not alter a Delta table without context");
+	}
+	if (info.type != AlterType::ALTER_TABLE) {
+		throw NotImplementedException("Delta tables only support ALTER TABLE ADD COLUMN");
+	}
+	auto &table_info = info.Cast<AlterTableInfo>();
+	if (table_info.alter_table_type != AlterTableType::ADD_COLUMN) {
+		throw NotImplementedException("Delta tables only support ALTER TABLE ADD COLUMN");
+	}
+
+	auto &add_info = table_info.Cast<AddColumnInfo>();
+	auto lookup_info = EntryLookupInfo(CatalogType::TABLE_ENTRY, info.name);
+	auto existing = LookupEntry(transaction, lookup_info);
+	if (!existing) {
+		throw CatalogException("Delta table '%s' does not exist", info.name);
+	}
+	auto &table = existing->Cast<DeltaTableEntry>();
+	auto column_mapping = table.tags.find("delta.columnMapping.mode");
+	if (column_mapping != table.tags.end() && !StringUtil::CIEquals(column_mapping->second, "none")) {
+		throw NotImplementedException(
+		    "Delta schema evolution on column-mapped tables is not supported until writes use physical column names");
+	}
+	if (table.ColumnExists(add_info.new_column.Name())) {
+		if (add_info.if_column_not_exists) {
+			return;
+		}
+		throw CatalogException("Column with name %s already exists!", add_info.new_column.Name());
+	}
+	if (add_info.new_column.Generated() || add_info.new_column.HasDefaultValue()) {
+		throw NotImplementedException("Delta schema evolution does not support generated or default columns");
+	}
+
+	ColumnList new_columns;
+	new_columns.AddColumn(add_info.new_column.Copy());
+	GetDeltaTransaction(transaction).AddColumns(transaction.GetContext(), new_columns);
 }
 
 static bool CatalogTypeIsSupported(CatalogType type) {
@@ -360,6 +398,26 @@ unique_ptr<DeltaTableEntry> DeltaSchemaEntry::CreateTableEntry(ClientContext &co
 	// Populate tags from domain metadata
 	{
 		auto snapshot_ref = snapshot->snapshot->GetLockingRef();
+		vector<string> writer_features;
+		ffi::visit_enabled_writer_features(
+		    snapshot_ref.GetPtr(), &writer_features,
+		    [](ffi::NullableCvoid engine_context, ffi::KernelStringSlice feature) {
+			    auto &features = *static_cast<vector<string> *>(const_cast<void *>(engine_context));
+			    features.push_back(KernelUtils::FromDeltaString(feature));
+		    });
+		std::sort(writer_features.begin(), writer_features.end());
+		table_info.tags.insert({"delta.writerFeatures", StringUtil::Join(writer_features, ", ")});
+
+		ffi::visit_metadata_configuration(
+		    snapshot_ref.GetPtr(), &table_info.tags,
+		    [](ffi::NullableCvoid engine_context, ffi::KernelStringSlice key, ffi::KernelStringSlice value) {
+			    auto key_string = KernelUtils::FromDeltaString(key);
+			    if (key_string != "delta.columnMapping.mode") {
+				    return;
+			    }
+			    auto &tags = *static_cast<InsertionOrderPreservingMap<string> *>(const_cast<void *>(engine_context));
+			    tags.insert({key_string, KernelUtils::FromDeltaString(value)});
+		    });
 		ffi::visit_domain_metadata(
 		    snapshot_ref.GetPtr(), snapshot->extern_engine.get(), &table_info.tags,
 		    [](ffi::NullableCvoid engine_context, ffi::KernelStringSlice domain, ffi::KernelStringSlice configuration) {

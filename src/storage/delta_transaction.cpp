@@ -1,5 +1,6 @@
 #include "storage/delta_transaction.hpp"
 
+#include "delta_schema_builder.hpp"
 #include "duckdb/common/helper.hpp"
 #include "path_utils.hpp"
 #include "functions/delta_scan/delta_scan.hpp"
@@ -415,9 +416,7 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 
 void DeltaTransaction::Commit(ClientContext &context) {
 	if (transaction_state == DeltaTransactionState::TRANSACTION_STARTED) {
-		transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
-
-		if (!outstanding_appends.empty()) {
+		if (!outstanding_appends.empty() || has_schema_changes) {
 			// Finally we add the registered transaction versions
 			for (const auto &app_version : app_versions) {
 				auto app_id = app_version.first;
@@ -484,6 +483,7 @@ void DeltaTransaction::Commit(ClientContext &context) {
 				ffi::free_committed_transaction(commit_result);
 			}
 		}
+		transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
 	}
 }
 
@@ -579,6 +579,39 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 	}
 }
 
+void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_columns) {
+	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
+		InitializeTransaction(context);
+	}
+
+	DeltaSchemaBuilder schema_builder(new_columns);
+	auto engine_schema = schema_builder.CreateEngineSchema();
+	ffi::Handle<ffi::ExclusiveTransaction> evolved_transaction;
+	auto evolve_result = KernelUtils::TryUnpackResult(
+	    ffi::transaction_with_added_columns(kernel_transaction.release(), &engine_schema,
+	                                        table_entry->snapshot->extern_engine.get()),
+	    evolved_transaction);
+	if (evolve_result.HasError()) {
+		if (schema_builder.GetError().HasError()) {
+			schema_builder.GetError().Throw();
+		}
+		evolve_result.Throw();
+	}
+	kernel_transaction = std::move(evolved_transaction);
+	has_schema_changes = true;
+
+	auto table_info = table_entry->GetInfo();
+	auto &create_info = table_info->Cast<CreateTableInfo>();
+	for (auto &column : new_columns.Logical()) {
+		create_info.columns.AddColumn(column.Copy());
+	}
+	auto snapshot = table_entry->snapshot;
+	auto &parent_schema = table_entry->ParentSchema();
+	table_entry = make_uniq<DeltaTableEntry>(table_entry->catalog, parent_schema, create_info);
+	table_entry->snapshot = std::move(snapshot);
+	write_entry = table_entry.get();
+}
+
 void DeltaTransaction::SetTransactionVersion(const string &app_id_p, idx_t new_version_p, Value expected_version_p) {
 	app_versions.insert({app_id_p, {new_version_p, std::move(expected_version_p)}});
 }
@@ -591,9 +624,9 @@ AccessMode DeltaTransaction::GetAccessMode() const {
 	return access_mode;
 }
 
-bool DeltaTransaction::HasOutstandingAppends() const {
+bool DeltaTransaction::HasOutstandingChanges() const {
 	unique_lock<mutex> lck(lock);
-	return !outstanding_appends.empty();
+	return !outstanding_appends.empty() || has_schema_changes;
 }
 
 optional_ptr<DeltaTableEntry> DeltaTransaction::GetTableEntry(idx_t version) {
