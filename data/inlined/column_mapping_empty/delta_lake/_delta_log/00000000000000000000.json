@@ -1,0 +1,3 @@
+{"commitInfo":{"timestamp":0,"operation":"CREATE TABLE","operationParameters":{},"isolationLevel":"Serializable","isBlindAppend":true,"operationMetrics":{},"engineInfo":"duckdb-delta test fixture"}}
+{"metaData":{"id":"00000000-0000-0000-0000-000000000001","format":{"provider":"parquet","options":{}},"schemaString":"{\"type\":\"struct\",\"fields\":[{\"name\":\"id\",\"type\":\"long\",\"nullable\":true,\"metadata\":{\"delta.columnMapping.id\":1,\"delta.columnMapping.physicalName\":\"col-00000000-0000-0000-0000-000000000001\"}}]}","partitionColumns":[],"configuration":{"delta.columnMapping.mode":"name","delta.columnMapping.maxColumnId":"1"},"createdTime":0}}
+{"protocol":{"minReaderVersion":2,"minWriterVersion":5}}

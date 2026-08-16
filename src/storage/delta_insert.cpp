@@ -48,15 +48,16 @@ public:
 	explicit DeltaInsertGlobalState(const DeltaTableEntry &table)
 	    : table_name(table.name), not_null_constraints(table.GetNotNullConstraints()) {
 		table.ThrowOnUnsupportedFieldForInserting();
-
-		columns = table.snapshot->GetLazyLoadedGlobalColumns();
+		for (const auto &column : table.GetColumns().Logical()) {
+			column_types.insert({column.Name(), column.Type()});
+		}
 	};
 
 	string table_name;
 
 	vector<DeltaDataFile> written_files;
 
-	vector<DeltaMultiFileColumnDefinition> columns;
+	case_insensitive_map_t<LogicalType> column_types;
 
 	idx_t insert_count = 0;
 
@@ -191,12 +192,10 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 			// Find type of column for stats TODO: column mapped names
 			bool found = false;
 			LogicalType coltype;
-			for (auto &col : global_state.columns) {
-				if (col.name == column_names[0]) {
-					found = true;
-					coltype = col.type;
-					break;
-				}
+			auto column_type = global_state.column_types.find(column_names[0]);
+			if (column_type != global_state.column_types.end()) {
+				found = true;
+				coltype = column_type->second;
 			}
 			if (!found) {
 				throw InternalException("Column %s not found in table %s", StringUtil::Join(column_names, "."),

@@ -47,7 +47,7 @@ TableFunction DeltaTableEntry::GetScanFunctionInternal(ClientContext &context, u
 	auto &delta_catalog = catalog.Cast<DeltaCatalog>();
 
 	auto &transaction = DeltaTransaction::Get(context, delta_catalog);
-	if (transaction.HasOutstandingAppends()) {
+	if (transaction.HasOutstandingChanges()) {
 		throw CatalogException("Scanning a table with uncommitted writes is not supported");
 	}
 

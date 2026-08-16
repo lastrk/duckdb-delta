@@ -1,0 +1,165 @@
+# name: test/sql/main/writing/schema_evolution_append.test
+# description: Additive schema evolution and append share one Delta transaction
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH 'data/inlined/legacy_writer_v2_empty/delta_lake' AS legacy_v2 (TYPE delta);
+
+query T
+SELECT map_extract_value(tags, 'delta.writerFeatures')
+FROM duckdb_tables()
+WHERE database_name = 'legacy_v2' AND schema_name = 'main' AND table_name = 'legacy_v2';
+----
+appendOnly, invariants
+
+statement ok
+DETACH legacy_v2;
+
+statement ok
+ATTACH '{TEMP_DIR}/schema_evolution_append' AS evolved (TYPE delta);
+
+statement ok
+CREATE TABLE evolved.evolved (id BIGINT, name VARCHAR);
+
+statement ok
+INSERT INTO evolved.evolved VALUES (1, 'base');
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/_delta_log/*.json');
+----
+2
+
+# The metadata action and AddFile action must commit as one new Delta version.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+ALTER TABLE evolved.evolved ADD COLUMN department VARCHAR;
+
+statement ok
+INSERT INTO evolved.evolved BY NAME SELECT 2 AS id, 'new' AS name, 'eng' AS department;
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/_delta_log/*.json');
+----
+3
+
+query III rowsort
+SELECT id, name, department FROM evolved.evolved;
+----
+1	base	NULL
+2	new	eng
+
+# Rollback must discard both the transaction-local schema and its staged file.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+ALTER TABLE evolved.evolved ADD COLUMN discarded VARCHAR;
+
+statement ok
+INSERT INTO evolved.evolved BY NAME SELECT 3 AS id, 'rolled back' AS name, 'ops' AS department, 'x' AS discarded;
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/_delta_log/*.json');
+----
+3
+
+query I
+SELECT count(*) FROM evolved.evolved;
+----
+2
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'evolved' AND column_name = 'discarded';
+----
+0
+
+# A failed commit must leave neither a log action nor its staged Parquet file.
+statement ok con1
+BEGIN TRANSACTION;
+
+statement ok con1
+INSERT INTO evolved.evolved BY NAME SELECT 3 AS id, 'first writer' AS name, 'ops' AS department;
+
+statement ok con2
+BEGIN TRANSACTION;
+
+statement ok con2
+INSERT INTO evolved.evolved BY NAME SELECT 4 AS id, 'conflicting writer' AS name, 'ops' AS department;
+
+statement ok con1
+COMMIT;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/**/*.parquet');
+----
+4
+
+statement error con2
+COMMIT;
+----
+commit conflict
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/**/*.parquet');
+----
+3
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_append/_delta_log/*.json');
+----
+4
+
+query III rowsort
+SELECT id, name, department FROM evolved.evolved;
+----
+1	base	NULL
+2	new	eng
+3	first writer	ops
+
+# Direct SQL callers must not bypass the column-mapping write boundary.
+statement ok
+ATTACH 'data/inlined/column_mapping_empty/delta_lake' AS mapped (TYPE delta);
+
+query T
+SELECT map_extract_value(tags, 'delta.columnMapping.mode')
+FROM duckdb_tables()
+WHERE database_name = 'mapped' AND schema_name = 'main' AND table_name = 'mapped';
+----
+name
+
+query I
+SELECT count(*) FROM glob('data/inlined/column_mapping_empty/delta_lake/_delta_log/*.json');
+----
+1
+
+statement error
+ALTER TABLE mapped.mapped ADD COLUMN unsafe_value VARCHAR;
+----
+Delta schema evolution on column-mapped tables is not supported
+
+query I
+SELECT count(*) FROM glob('data/inlined/column_mapping_empty/delta_lake/_delta_log/*.json');
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'mapped' AND column_name = 'unsafe_value';
+----
+0
+
+statement ok
+DETACH mapped;
