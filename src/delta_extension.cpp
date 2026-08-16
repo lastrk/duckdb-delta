@@ -43,6 +43,12 @@ static unique_ptr<Catalog> DeltaCatalogAttach(optional_ptr<StorageExtensionInfo>
 		if (StringUtil::Lower(option.first) == "internal_table_name") {
 			res->internal_table_name = StringValue::Get(option.second);
 		}
+		if (StringUtil::Lower(option.first) == "expected_partition_columns") {
+			auto list = option.second.DefaultCastAs(LogicalType::LIST(LogicalType::VARCHAR));
+			for (const auto &column : ListValue::GetChildren(list)) {
+				res->expected_partition_columns.push_back(StringValue::Get(column));
+			}
+		}
 		if (StringUtil::Lower(option.first) == "child_catalog_mode") {
 			res->child_catalog_mode = option.second.GetValue<bool>();
 		}

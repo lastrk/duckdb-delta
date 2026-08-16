@@ -1,0 +1,76 @@
+# name: test/sql/main/writing/partitioned_append.test
+# description: partitioned appends write every file and validate caller expectations
+# group: [writing]
+
+require parquet
+
+require delta
+
+require notwindows
+
+statement ok
+ATTACH '{TEMP_DIR}/partitioned_append' AS t (TYPE delta, EXPECTED_PARTITION_COLUMNS ['part']);
+
+statement ok
+CREATE TABLE t.t (i BIGINT, part VARCHAR) PARTITIONED BY (part);
+
+# PhysicalCopy returns one metadata row for every partition file. The Delta
+# sink must retain all rows in one commit.
+statement ok
+INSERT INTO t.t VALUES (1, 'a'), (2, 'b'), (3, NULL), (4, '');
+
+query III
+SELECT count(*), count(part), count(*) FILTER (WHERE part IS NULL) FROM t.t;
+----
+4	2	2
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/partitioned_append/_delta_log/*.json');
+----
+2
+
+statement ok
+DETACH t;
+
+# A caller-provided partition specification must match the table snapshot. The
+# check runs before the Parquet writer, so a mismatch cannot add files or a log
+# version.
+statement ok
+ATTACH '{TEMP_DIR}/partitioned_append' AS t (TYPE delta, EXPECTED_PARTITION_COLUMNS ['i']);
+
+statement error
+INSERT INTO t.t VALUES (5, 'a');
+----
+DELTA_METADATA_MISMATCH
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/partitioned_append/_delta_log/*.json');
+----
+2
+
+query I
+SELECT count(*) FROM t.t;
+----
+4
+
+statement ok
+DETACH t;
+
+# Multiple partition columns use their metadata order, and non-string values
+# retain their Delta serialization.
+statement ok
+ATTACH '{TEMP_DIR}/multi_partitioned_append' AS t (
+    TYPE delta,
+    EXPECTED_PARTITION_COLUMNS ['part', 'flag']
+);
+
+statement ok
+CREATE TABLE t.t (i BIGINT, part VARCHAR, flag BOOLEAN) PARTITIONED BY (part, flag);
+
+statement ok
+INSERT INTO t.t VALUES (1, 'a', true), (2, 'a', false), (3, 'b', true);
+
+query III
+SELECT count(*), count(DISTINCT part), count(DISTINCT flag) FROM t.t;
+----
+3	2	2

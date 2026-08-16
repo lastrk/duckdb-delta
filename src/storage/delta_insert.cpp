@@ -22,6 +22,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 
@@ -221,12 +222,16 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 			auto &partition_children = MapValue::GetChildren(partition_info);
 			for (idx_t col_idx = 0; col_idx < partition_children.size(); col_idx++) {
 				auto &struct_children = StructValue::GetChildren(partition_children[col_idx]);
-				// from PROTOCOL doc, Partition Value Serialization: null values are serialized as "".
-				auto part_value = struct_children[1].IsNull() ? string() : StringValue::Get(struct_children[1]);
+				auto &partition_value = struct_children[1];
+				bool is_empty_string = !partition_value.IsNull() &&
+				                       partition_value.type().id() == LogicalTypeId::VARCHAR &&
+				                       StringValue::Get(partition_value).empty();
 
 				DeltaPartition file_partition_info;
 				file_partition_info.partition_column_idx = col_idx;
-				file_partition_info.partition_value = part_value;
+				file_partition_info.partition_value = partition_value.IsNull() || is_empty_string
+				                                               ? Value(LogicalType::VARCHAR)
+				                                               : partition_value;
 				data_file.partition_values.push_back(std::move(file_partition_info));
 			}
 		}
@@ -238,11 +243,8 @@ static void AddWrittenFiles(DeltaInsertGlobalState &global_state, DataChunk &chu
 SinkResultType DeltaInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &global_state = input.global_state.Cast<DeltaInsertGlobalState>();
 
-	if (chunk.size() != 1) {
-		throw InternalException(
-		    "DeltaInsert::Sink expects a single row containing output of the PhysicalCopy that should be its Source");
-	}
-
+	// PhysicalCopy returns one metadata row per written file. An unpartitioned
+	// write normally has one row, while a partitioned write can have many.
 	AddWrittenFiles(global_state, chunk);
 
 	return SinkResultType::NEED_MORE_INPUT;
@@ -303,6 +305,13 @@ static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstanc
 	return schema.GetEntry(data, CatalogType::COPY_FUNCTION_ENTRY, name)->Cast<CopyFunctionCatalogEntry>();
 }
 
+static string FormatPartitionColumns(const vector<string> &columns) {
+	if (columns.empty()) {
+		return "[]";
+	}
+	return "[`" + StringUtil::Join(columns, "`, `") + "`]";
+}
+
 namespace {
 
 struct DeltaStringWidthCheckData : public FunctionData {
@@ -359,24 +368,47 @@ ScalarFunction GetStringWidthCheckFunction() {
 	return function;
 }
 
+void DeltaCanonicalizeStringPartition(DataChunk &args, ExpressionState &, Vector &result) {
+	UnaryExecutor::ExecuteWithNulls<string_t, string_t>(
+	    args.data[0], result, args.size(), [&](string_t input, ValidityMask &validity, idx_t index) {
+		    if (input.GetSize() == 0) {
+			    validity.SetInvalid(index);
+			    return string_t();
+		    }
+		    return StringVector::AddString(result, input);
+	    });
+}
+
+ScalarFunction GetStringPartitionCanonicalizationFunction() {
+	return ScalarFunction("delta_canonicalize_string_partition", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                      DeltaCanonicalizeStringPartition);
+}
+
 } // namespace
 
 //! Adapts the insert child plan to what the parquet copy expects. Any further per-column rewrite on the write path
 //! belongs here, between the child and the copy: the sink only ever sees the copy's written-file summary, never data.
 static PhysicalOperator &PlanInsertProjection(PhysicalPlanGenerator &planner, PhysicalOperator &child,
                                               const ColumnList &columns,
-                                              const vector<DeltaStringWidthBound> &width_bounds) {
-	if (width_bounds.empty()) {
-		return child;
-	}
-
+	                                              const vector<DeltaStringWidthBound> &width_bounds,
+	                                              const vector<idx_t> &partition_columns) {
 	auto types = child.GetTypes();
 	if (types.size() != columns.PhysicalColumnCount()) {
-		// The binder resolves the child into table order and width, so this should not fire; refuse the write rather
-		// than check widths against columns we cannot line up.
-		throw BinderException("Cannot write to Delta table with declared CHAR/VARCHAR widths: the insert produces %llu "
-		                      "columns but the table has %llu",
+		// The binder resolves the child into table order and width. Refuse a write
+		// when the projection cannot safely align expressions with table columns.
+		throw BinderException("Cannot prepare Delta insert: the insert produces %llu columns but the table has %llu",
 		                      types.size(), columns.PhysicalColumnCount());
+	}
+
+	bool has_string_partition = false;
+	for (auto partition_column : partition_columns) {
+		if (types[partition_column].id() == LogicalTypeId::VARCHAR) {
+			has_string_partition = true;
+			break;
+		}
+	}
+	if (width_bounds.empty() && !has_string_partition) {
+		return child;
 	}
 
 	vector<unique_ptr<Expression>> expressions;
@@ -402,6 +434,17 @@ static PhysicalOperator &PlanInsertProjection(PhysicalPlanGenerator &planner, Ph
 		    LogicalType::VARCHAR, GetStringWidthCheckFunction(), std::move(check_children),
 		    make_uniq<DeltaStringWidthCheckData>(column.Name(), width_bound.declared_type,
 		                                         width_bound.max_length.GetIndex()));
+	}
+
+	for (auto partition_column : partition_columns) {
+		if (types[partition_column].id() != LogicalTypeId::VARCHAR) {
+			continue;
+		}
+		vector<unique_ptr<Expression>> canonicalize_children;
+		canonicalize_children.push_back(std::move(expressions[partition_column]));
+		expressions[partition_column] = make_uniq<BoundFunctionExpression>(
+		    LogicalType::VARCHAR, GetStringPartitionCanonicalizationFunction(), std::move(canonicalize_children),
+		    nullptr);
 	}
 
 	auto &projection =
@@ -431,6 +474,21 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 		table_entry = default_table_entry.entry->Cast<DeltaTableEntry>();
 	} else {
 		table_entry = op.table.Cast<DeltaTableEntry>();
+	}
+
+	if (!expected_partition_columns.empty()) {
+		auto table_partition_columns = table_entry->snapshot->GetPartitionColumns();
+		bool columns_match = expected_partition_columns.size() == table_partition_columns.size();
+		for (idx_t i = 0; columns_match && i < expected_partition_columns.size(); i++) {
+			columns_match = expected_partition_columns[i] == table_partition_columns[i];
+		}
+		if (!columns_match) {
+			throw InvalidInputException(
+			    "[DELTA_METADATA_MISMATCH] A metadata mismatch was detected when writing to the Delta table.\n"
+			    "- Partition columns do not match the partition columns of the table.\n"
+			    "Given: %s\nTable: %s\nSQLSTATE: 42KDG",
+			    FormatPartitionColumns(expected_partition_columns), FormatPartitionColumns(table_partition_columns));
+		}
 	}
 
 	string delta_path = Path::Normalize(table_entry->snapshot->GetPath());
@@ -510,7 +568,7 @@ PhysicalOperator &DeltaCatalog::PlanInsert(ClientContext &context, PhysicalPlanG
 	physical_copy_ref.return_type = CopyFunctionReturnType::WRITTEN_FILE_STATISTICS;
 	physical_copy_ref.write_partition_columns = true;
 	physical_copy_ref.children.push_back(
-	    PlanInsertProjection(planner, *plan, columns, table_entry->snapshot->GetStringWidthBounds()));
+	    PlanInsertProjection(planner, *plan, columns, table_entry->snapshot->GetStringWidthBounds(), partition_columns));
 	physical_copy_ref.names = names_to_write;
 	physical_copy_ref.expected_types = types_to_write;
 	physical_copy_ref.hive_file_pattern = true;

@@ -236,12 +236,19 @@ struct WriteMetaData {
 			auto file_name = file.file_name.substr(file_name_offset);
 			D_ASSERT(!StringUtil::StartsWith(file_name, "/"));
 
-			InsertionOrderPreservingMap<string> partitions = {};
+			vector<Value> partition_keys;
+			vector<Value> partition_values;
+			partition_keys.reserve(file.partition_values.size());
+			partition_values.reserve(file.partition_values.size());
 			for (const auto &part : file.partition_values) {
-				partitions.insert({snapshot.GetPartitionColumns()[part.partition_column_idx], part.partition_value});
+				partition_keys.emplace_back(snapshot.GetPartitionColumns()[part.partition_column_idx]);
+				partition_values.push_back(part.partition_value);
 			}
 
-			Append(file_name, Value::MAP(partitions), file);
+			Append(file_name,
+			       Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(partition_keys),
+			                  std::move(partition_values)),
+			       file);
 		}
 	}
 

@@ -225,7 +225,13 @@ void DeltaMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const 
 			auto col_partition_entry = file_metadata.partition_map.find(global_columns[col_id].name);
 			if (col_partition_entry != file_metadata.partition_map.end()) {
 				auto &current_type = global_columns[col_id].type;
-				auto maybe_value = Value(col_partition_entry->second).DefaultCastAs(current_type);
+				auto partition_value = Value(col_partition_entry->second);
+				// Delta partition serialization maps an empty string to null.
+				auto maybe_value = !partition_value.IsNull() &&
+				                           partition_value.type().id() == LogicalTypeId::VARCHAR &&
+				                           StringValue::Get(partition_value).empty()
+				                       ? Value(current_type)
+				                       : partition_value.DefaultCastAs(current_type);
 				reader_data.constant_map.Add(global_idx, maybe_value);
 			}
 		}

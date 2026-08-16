@@ -37,6 +37,7 @@ public:
 	idx_t use_specific_version;
 	bool pushdown_partition_info;
 	DeltaFilterPushdownMode filter_pushdown_mode;
+	vector<string> expected_partition_columns;
 
 	string internal_table_name;
 	bool child_catalog_mode = false;
