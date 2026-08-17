@@ -161,5 +161,236 @@ SELECT count(*) FROM duckdb_columns() WHERE database_name = 'mapped' AND column_
 ----
 0
 
+statement error
+SELECT * FROM delta_add_columns(
+    'mapped',
+    'main',
+    'mapped',
+    NULL::STRUCT(unsafe_metadata_value VARCHAR),
+    '{"type":"struct","fields":[{"name":"unsafe_metadata_value","type":"string","nullable":true,"metadata":{"comment":"unsafe"}}]}'
+);
+----
+Delta schema evolution on column-mapped tables is not supported
+
+query I
+SELECT count(*) FROM glob('data/inlined/column_mapping_empty/delta_lake/_delta_log/*.json');
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'mapped' AND column_name = 'unsafe_metadata_value';
+----
+0
+
 statement ok
 DETACH mapped;
+
+# The metadata-aware API carries arbitrary JSON into the same schema-and-data commit.
+statement ok
+ATTACH '{TEMP_DIR}/schema_evolution_metadata' AS metadata_evolved (TYPE delta);
+
+statement ok
+CREATE TABLE metadata_evolved.metadata_evolved (id BIGINT);
+
+statement ok
+INSERT INTO metadata_evolved.metadata_evolved VALUES (1);
+
+statement ok
+BEGIN TRANSACTION;
+
+query I
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(department VARCHAR),
+    '{"type":"struct","fields":[{"name":"department","type":"string","nullable":true,"metadata":{"comment":"business unit","owner":{"team":"risk"}}}]}'
+);
+----
+1
+
+statement ok
+INSERT INTO metadata_evolved.metadata_evolved BY NAME SELECT 2 AS id, 'eng' AS department;
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*)
+FROM read_text('{TEMP_DIR}/schema_evolution_metadata/_delta_log/*.json')
+WHERE contains(content, '\"comment\":\"business unit\"')
+  AND contains(content, '\"owner\":{\"team\":\"risk\"}');
+----
+1
+
+query II rowsort
+SELECT id, department FROM metadata_evolved.metadata_evolved;
+----
+1	NULL
+2	eng
+
+# The kernel rejects metadata JSON whose writer shape does not match.
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(bad BIGINT),
+    '{"type":"struct","fields":[{"name":"bad","type":"string","nullable":true,"metadata":{"comment":"wrong type"}}]}'
+);
+----
+metadata does not match the engine schema
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_metadata/_delta_log/*.json');
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'metadata_evolved' AND column_name = 'bad';
+----
+0
+
+# Reserved metadata cannot introduce a feature that the table protocol does not support.
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(generated_value BIGINT),
+    '{"type":"struct","fields":[{"name":"generated_value","type":"long","nullable":true,"metadata":{"delta.generationExpression":"id + 1"}}]}'
+);
+----
+required 'generatedColumns' feature
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_metadata/_delta_log/*.json');
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'metadata_evolved' AND column_name = 'generated_value';
+----
+0
+
+# ADD COLUMN cannot introduce a current default in the same operation.
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(defaulted_value VARCHAR),
+    '{"type":"struct","fields":[{"name":"defaulted_value","type":"string","nullable":true,"metadata":{"CURRENT_DEFAULT":"\u0027unknown\u0027"}}]}'
+);
+----
+CURRENT_DEFAULT
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_metadata/_delta_log/*.json');
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'metadata_evolved' AND column_name = 'defaulted_value';
+----
+0
+
+# Direct callers cannot introduce Spark-internal or physical-history metadata.
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(internal_value BIGINT),
+    '{"type":"struct","fields":[{"name":"internal_value","type":"long","nullable":true,"metadata":{"EXISTS_DEFAULT":"marker"}}]}'
+);
+----
+EXISTS_DEFAULT
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(changed_value BIGINT),
+    '{"type":"struct","fields":[{"name":"changed_value","type":"long","nullable":true,"metadata":{"delta.typeChanges":[]}}]}'
+);
+----
+delta.typeChanges
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement error
+SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(kernel_internal BIGINT),
+    '{"type":"struct","fields":[{"name":"kernel_internal","type":"long","nullable":true,"metadata":{"delta.isInternalColumn":true}}]}'
+);
+----
+delta.isInternalColumn
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM glob('{TEMP_DIR}/schema_evolution_metadata/_delta_log/*.json');
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_columns()
+WHERE database_name = 'metadata_evolved'
+  AND column_name IN ('internal_value', 'changed_value', 'kernel_internal');
+----
+0
+
+# Prepared statements must depend on the bound Delta table entry.
+statement ok
+PREPARE add_after_detach AS SELECT * FROM delta_add_columns(
+    'metadata_evolved',
+    'main',
+    'metadata_evolved',
+    NULL::STRUCT(after_detach VARCHAR),
+    '{"type":"struct","fields":[{"name":"after_detach","type":"string","nullable":true,"metadata":{}}]}'
+);
+
+statement ok
+DETACH metadata_evolved;
+
+statement error
+EXECUTE add_after_detach;
+----
+Catalog "metadata_evolved" does not exist

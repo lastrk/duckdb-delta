@@ -14,6 +14,7 @@ vector<TableFunctionSet> DeltaFunctions::GetTableFunctions(ExtensionLoader &load
 	for (const auto &fun : GetTransactionIdempotencyHelpers(loader.GetDatabaseInstance())) {
 		functions.push_back(TableFunctionSet(fun));
 	}
+	functions.push_back(TableFunctionSet(GetSchemaEvolutionFunction()));
 
 	return functions;
 }

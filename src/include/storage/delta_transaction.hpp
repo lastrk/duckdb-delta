@@ -32,7 +32,8 @@ public:
 	void Rollback();
 
 	void Append(ClientContext &context, const vector<DeltaDataFile> &append_files);
-	void AddColumns(ClientContext &context, const ColumnList &new_columns);
+	void AddColumns(ClientContext &context, const ColumnList &new_columns,
+	                optional_ptr<const string> metadata_schema_json = nullptr);
 
 	void SetTransactionVersion(const string &app_id, idx_t new_version, Value expected_value);
 

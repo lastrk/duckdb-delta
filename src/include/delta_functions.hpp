@@ -54,5 +54,6 @@ private:
 	static ScalarFunctionSet GetWriteFileFunction(ExtensionLoader &loader);
 
 	static vector<TableFunction> GetTransactionIdempotencyHelpers(DatabaseInstance &instance);
+	static TableFunction GetSchemaEvolutionFunction();
 };
 } // namespace duckdb

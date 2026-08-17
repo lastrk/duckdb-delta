@@ -579,7 +579,8 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 	}
 }
 
-void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_columns) {
+void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_columns,
+                                  optional_ptr<const string> metadata_schema_json) {
 	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
 		InitializeTransaction(context);
 	}
@@ -587,10 +588,17 @@ void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_
 	DeltaSchemaBuilder schema_builder(new_columns);
 	auto engine_schema = schema_builder.CreateEngineSchema();
 	ffi::Handle<ffi::ExclusiveTransaction> evolved_transaction;
-	auto evolve_result = KernelUtils::TryUnpackResult(
-	    ffi::transaction_with_added_columns(kernel_transaction.release(), &engine_schema,
-	                                        table_entry->snapshot->extern_engine.get()),
-	    evolved_transaction);
+	auto evolve_result = metadata_schema_json
+	                         ? KernelUtils::TryUnpackResult(
+	                               ffi::transaction_with_added_columns_and_metadata(
+	                                   kernel_transaction.release(), &engine_schema,
+	                                   KernelUtils::ToDeltaString(*metadata_schema_json),
+	                                   table_entry->snapshot->extern_engine.get()),
+	                               evolved_transaction)
+	                         : KernelUtils::TryUnpackResult(
+	                               ffi::transaction_with_added_columns(kernel_transaction.release(), &engine_schema,
+	                                                                   table_entry->snapshot->extern_engine.get()),
+	                               evolved_transaction);
 	if (evolve_result.HasError()) {
 		if (schema_builder.GetError().HasError()) {
 			schema_builder.GetError().Throw();
