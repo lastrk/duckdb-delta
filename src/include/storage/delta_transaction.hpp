@@ -19,6 +19,7 @@ class DeltaMultiFileList;
 struct DeltaDataFile;
 struct DeltaMultiFileColumnDefinition;
 class ColumnList;
+struct DeltaCommitOutcome;
 
 enum class DeltaTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -28,14 +29,16 @@ public:
 	~DeltaTransaction() override;
 
 	void Start();
-	void Commit(ClientContext &context);
+	DeltaCommitOutcome Commit(ClientContext &context);
 	void Rollback();
 
 	void Append(ClientContext &context, const vector<DeltaDataFile> &append_files);
 	void AddColumns(ClientContext &context, const ColumnList &new_columns,
 	                optional_ptr<const string> metadata_schema_json = nullptr);
 
-	void SetTransactionVersion(const string &app_id, idx_t new_version, Value expected_value);
+	void SetTransactionVersion(ClientContext &context, const string &app_id, int64_t new_version, Value expected_value);
+	string GetCommitToken() const;
+	bool CommitBoundaryEntered() const;
 
 	static DeltaTransaction &Get(ClientContext &context, Catalog &catalog);
 	AccessMode GetAccessMode() const;
@@ -52,7 +55,8 @@ public:
 	void CleanUpFiles();
 
 	//! CGetCommits callback for Unity Catalog managed commits
-	//! CCommit callback for Unity Catalog managed commits - returns None on success, Some(error) on failure
+	//! CCommit callback for Unity Catalog managed commits - returns None on
+	//! success, Some(error) on failure
 	static ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> CommitCallback(ffi::NullableCvoid context,
 	                                                                                ffi::CommitRequest request);
 
@@ -68,8 +72,8 @@ private:
 	mutable mutex lock;
 
 	//! Cached table entry (without a specified version)
-	//! Note: this should be the latest version of the table, pinned at the version of first reading it during this
-	//! transaction
+	//! Note: this should be the latest version of the table, pinned at the
+	//! version of first reading it during this transaction
 	unique_ptr<DeltaTableEntry> table_entry;
 
 	//! Cached table entries at specific versions
@@ -84,18 +88,20 @@ private:
 	bool has_schema_changes = false;
 
 	KernelExclusiveTransaction kernel_transaction;
+	bool commit_boundary_entered = false;
 
 	//! stores a ptr to the table entry that this transaction is writing to
 	optional_ptr<DeltaTableEntry> write_entry;
 
 	// Versions registered to this transaction
 	struct TransactionVersion {
-		idx_t new_version;
+		int64_t new_version;
 		Value expected_version;
 	};
 	unordered_map<string, TransactionVersion> app_versions;
 
-	//! Whether we should invoke our parent catalog to do the commit or this catalog can do the commit itself
+	//! Whether we should invoke our parent catalog to do the commit or this
+	//! catalog can do the commit itself
 	bool parent_commit = false;
 	string parent_catalog_name;
 	// string parent_catalog_schema;

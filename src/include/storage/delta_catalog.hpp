@@ -8,14 +8,28 @@
 
 #pragma once
 
-#include "functions/delta_scan/delta_scan.hpp"
 #include "delta_schema_entry.hpp"
 #include "duckdb/catalog/catalog.hpp"
-#include "duckdb/function/table_function.hpp"
 #include "duckdb/common/enums/access_mode.hpp"
+#include "duckdb/function/table_function.hpp"
+#include "functions/delta_scan/delta_scan.hpp"
 
 namespace duckdb {
 class DeltaSchemaEntry;
+
+enum class DeltaCommitOutcomeType : uint8_t { NO_CHANGES, COMMITTED, CONFLICT, NO_EFFECT, INDETERMINATE };
+
+struct DeltaCommitOutcome {
+	DeltaCommitOutcome(DeltaCommitOutcomeType type, string token_app_id, idx_t commit_version, string message)
+	    : type(type), token_app_id(std::move(token_app_id)), commit_version(commit_version),
+	      message(std::move(message)) {
+	}
+
+	DeltaCommitOutcomeType type;
+	string token_app_id;
+	idx_t commit_version;
+	string message;
+};
 
 idx_t ParseDeltaVersionFromAtClause(const BoundAtClause &at_clause);
 
@@ -67,8 +81,8 @@ public:
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 
-	//! Opts this catalog in to PARTITIONED BY and WITH (...), which the base Catalog rejects for
-	//! every catalog that does not claim them.
+	//! Opts this catalog in to PARTITIONED BY and WITH (...), which the base
+	//! Catalog rejects for every catalog that does not claim them.
 	ErrorData SupportsCreateTable(BoundCreateTableInfo &info) override;
 
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
@@ -97,6 +111,9 @@ public:
 
 	bool UseCachedSnapshot();
 
+	void StoreCommitOutcome(DeltaCommitOutcome outcome);
+	DeltaCommitOutcome TakeCommitOutcome(const string &token_app_id) const;
+
 	DeltaSchemaEntry &GetMainSchema() {
 		return *main_schema;
 	}
@@ -107,6 +124,8 @@ private:
 private:
 	unique_ptr<DeltaSchemaEntry> main_schema;
 	string default_schema;
+	mutable mutex commit_outcome_lock;
+	mutable unique_ptr<DeltaCommitOutcome> commit_outcome;
 };
 
 } // namespace duckdb

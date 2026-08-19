@@ -17,31 +17,76 @@ Transaction &DeltaTransactionManager::StartTransaction(ClientContext &context) {
 	return result;
 }
 
-static ErrorData HandleConflict(DeltaTransaction &transaction, ErrorData &original_error) {
+static bool CleanUpNoEffect(DeltaTransaction &transaction, ErrorData &original_error) {
 	try {
 		transaction.CleanUpFiles();
 	} catch (std::exception &ex) {
 		ErrorData new_error(ex);
-		string new_message = StringUtil::Format(
-		    "Multiple exceptions happened. Firstly, the DeltaTransaction failed to commit with "
-		    "'%s'. Secondly, DuckDB failed to clean up the files produced by this transaction, with: '%s'",
-		    original_error.Message(), new_error.Message());
-		return ErrorData(original_error.Type(), new_message);
+		string new_message = StringUtil::Format("Multiple exceptions happened. Firstly, the "
+		                                        "DeltaTransaction failed to commit with "
+		                                        "'%s'. Secondly, DuckDB failed to clean up the "
+		                                        "files produced by this transaction, with: '%s'",
+		                                        original_error.Message(), new_error.Message());
+		original_error = ErrorData(original_error.Type(), new_message);
+		return false;
 	}
-	return original_error;
+	return true;
 }
 
 ErrorData DeltaTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
 	auto &delta_transaction = transaction.Cast<DeltaTransaction>();
+	auto token_app_id = delta_transaction.GetCommitToken();
+	DeltaCommitOutcome outcome {DeltaCommitOutcomeType::NO_CHANGES, token_app_id, DConstants::INVALID_INDEX, ""};
+	ErrorData error;
 	try {
-		delta_transaction.Commit(context);
+		outcome = delta_transaction.Commit(context);
+		outcome.token_app_id = token_app_id;
 	} catch (std::exception &ex) {
-		ErrorData err(ex);
-		return HandleConflict(delta_transaction, err);
+		error = ErrorData(ex);
+		if (delta_transaction.CommitBoundaryEntered()) {
+			if (!token_app_id.empty()) {
+				delta_catalog.StoreCommitOutcome(
+				    {DeltaCommitOutcomeType::INDETERMINATE, token_app_id, DConstants::INVALID_INDEX, error.Message()});
+			}
+		} else {
+			auto cleanup_succeeded = CleanUpNoEffect(delta_transaction, error);
+			if (!token_app_id.empty() && cleanup_succeeded) {
+				delta_catalog.StoreCommitOutcome(
+				    {DeltaCommitOutcomeType::NO_EFFECT, token_app_id, DConstants::INVALID_INDEX, error.Message()});
+			}
+		}
 	}
+
+	if (!error.HasError()) {
+		switch (outcome.type) {
+		case DeltaCommitOutcomeType::NO_CHANGES:
+			break;
+		case DeltaCommitOutcomeType::COMMITTED:
+			if (!token_app_id.empty()) {
+				delta_catalog.StoreCommitOutcome(outcome);
+			}
+			break;
+		case DeltaCommitOutcomeType::CONFLICT:
+		case DeltaCommitOutcomeType::NO_EFFECT: {
+			error = ErrorData(TransactionException("%s", outcome.message));
+			auto cleanup_succeeded = CleanUpNoEffect(delta_transaction, error);
+			if (!token_app_id.empty() && cleanup_succeeded) {
+				delta_catalog.StoreCommitOutcome(outcome);
+			}
+			break;
+		}
+		case DeltaCommitOutcomeType::INDETERMINATE:
+			if (!token_app_id.empty()) {
+				delta_catalog.StoreCommitOutcome(outcome);
+			}
+			error = ErrorData(IOException("%s", outcome.message));
+			break;
+		}
+	}
+
 	lock_guard<mutex> l(transaction_lock);
 	transactions.erase(transaction);
-	return ErrorData();
+	return error;
 }
 
 void DeltaTransactionManager::RollbackTransaction(Transaction &transaction) {
@@ -71,8 +116,8 @@ void DeltaTransactionManager::Checkpoint(ClientContext &context, bool force) {
 
 	auto checkpoint_result = table_entry.snapshot->TryUnpackKernelResult(
 	    ffi::checkpoint_snapshot(snapshot_ref.GetPtr(), table_entry.snapshot->extern_engine.get(), nullptr));
-	// Both result variants carry an owned snapshot handle (the pre-existing or newly-written
-	// snapshot) that we don't need here, but must still release.
+	// Both result variants carry an owned snapshot handle (the pre-existing or
+	// newly-written snapshot) that we don't need here, but must still release.
 	if (checkpoint_result.tag == ffi::FfiCheckpointWriteResult::Tag::FfiCheckpointWriteResultWritten) {
 		ffi::free_snapshot(checkpoint_result.written._0);
 	} else {
