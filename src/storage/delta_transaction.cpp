@@ -94,7 +94,7 @@ struct StatNode {
 	// If leaf node contains value
 	DeltaColumnStats stats;
 	LogicalType type;
-	unordered_map<string, StatNode> children;
+	map<string, StatNode> children;
 };
 
 static LogicalType ParseInnerType(const LogicalType &root_type, const vector<string> &name, idx_t offset) {
@@ -116,7 +116,7 @@ static LogicalType ParseInnerType(const LogicalType &root_type, const vector<str
 
 // Converts the stats from a.b.c -> colstat to a nested StatNode tree
 static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumnStats &stats,
-                           unordered_map<string, StatNode> &output) {
+                           map<string, StatNode> &output) {
 	if (name.size() <= offset) {
 		throw InternalException("Invalid stats name: empty");
 	}
@@ -144,7 +144,7 @@ static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumn
 	return ParseStatsType(name, offset + 1, stats, output[name[offset]].children);
 }
 
-static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, StatNode> &tree, const string &field) {
+static Value CreateValueLogicalTypeFromStatNode(const map<string, StatNode> &tree, const string &field) {
 	child_list_t<Value> children;
 
 	for (const auto &node : tree) {
@@ -176,7 +176,7 @@ static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, Stat
 struct WriteMetaData {
 	static LogicalType GetStatsType(optional_ptr<const DeltaDataFile> file) {
 		if (file && !file->column_stats.empty()) {
-			unordered_map<string, StatNode> result;
+			map<string, StatNode> result;
 			for (auto stat : file->column_stats) {
 				ParseStatsType(stat.first, 0, stat.second, result);
 			}
@@ -199,7 +199,7 @@ struct WriteMetaData {
 			return Value::STRUCT(GetStatsType(nullptr), {Value::BIGINT(file.row_count), Value(tight_bounds)});
 		}
 
-		unordered_map<string, StatNode> result;
+		map<string, StatNode> result;
 		for (auto stat : file.column_stats) {
 			ParseStatsType(stat.first, 0, stat.second, result);
 		}
@@ -534,8 +534,11 @@ void DeltaTransaction::InitializeTransaction(ClientContext &context) {
 			// Create UC commit client with callbacks, passing `this` as the context
 			auto commit_client = ffi::get_uc_commit_client(this, CommitCallback);
 			auto table_id = KernelUtils::ToDeltaString(unity_table_id.empty() ? path : unity_table_id);
-			auto uc_committer = table_entry->snapshot->TryUnpackKernelResult(
-			    ffi::get_uc_committer(commit_client, table_id, DuckDBEngineError::AllocateError));
+			auto catalog_name = KernelUtils::ToDeltaString(parent_catalog_name);
+			auto schema_name = KernelUtils::ToDeltaString(table_entry->ParentSchema().name);
+			auto table_name = KernelUtils::ToDeltaString(table_entry->name);
+			auto uc_committer = table_entry->snapshot->TryUnpackKernelResult(ffi::get_uc_committer(
+			    commit_client, table_id, catalog_name, schema_name, table_name, DuckDBEngineError::AllocateError));
 			new_kernel_transaction = table_entry->snapshot->TryUnpackKernelResult(ffi::transaction_with_committer(
 			    snapshot_ref.GetPtr(), table_entry->snapshot->extern_engine.get(), uc_committer));
 		} else {
