@@ -2,27 +2,27 @@
 
 #include "delta_schema_builder.hpp"
 #include "duckdb/common/helper.hpp"
-#include "path_utils.hpp"
-#include "functions/delta_scan/delta_scan.hpp"
 #include "functions/delta_scan/delta_multi_file_list.hpp"
+#include "functions/delta_scan/delta_scan.hpp"
+#include "path_utils.hpp"
 
 #include <duckdb/main/client_data.hpp>
 
-#include "storage/delta_catalog.hpp"
-#include "duckdb/main/client_properties.hpp"
-#include "duckdb/common/arrow/arrow_converter.hpp"
-#include "duckdb/common/arrow/arrow_appender.hpp"
+#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/arrow/appender/append_data.hpp"
-#include "duckdb/main/attached_database.hpp"
-#include "duckdb/main/client_context_file_opener.hpp"
-#include "functions/delta_scan/delta_scan.hpp"
-#include "storage/delta_insert.hpp"
-#include "duckdb/main/connection.hpp"
-#include "storage/delta_table_entry.hpp"
+#include "duckdb/common/arrow/arrow_appender.hpp"
+#include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_context_file_opener.hpp"
+#include "duckdb/main/client_properties.hpp"
+#include "duckdb/main/connection.hpp"
+#include "functions/delta_scan/delta_scan.hpp"
+#include "storage/delta_catalog.hpp"
+#include "storage/delta_insert.hpp"
+#include "storage/delta_table_entry.hpp"
 
 namespace duckdb {
 
@@ -94,7 +94,7 @@ struct StatNode {
 	// If leaf node contains value
 	DeltaColumnStats stats;
 	LogicalType type;
-	unordered_map<string, StatNode> children;
+	map<string, StatNode> children;
 };
 
 static LogicalType ParseInnerType(const LogicalType &root_type, const vector<string> &name, idx_t offset) {
@@ -116,7 +116,7 @@ static LogicalType ParseInnerType(const LogicalType &root_type, const vector<str
 
 // Converts the stats from a.b.c -> colstat to a nested StatNode tree
 static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumnStats &stats,
-                           unordered_map<string, StatNode> &output) {
+                           map<string, StatNode> &output) {
 	if (name.size() <= offset) {
 		throw InternalException("Invalid stats name: empty");
 	}
@@ -124,7 +124,8 @@ static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumn
 	bool is_leaf = (name.size() == 1 + offset);
 
 	if (output.find(name[offset]) != output.end()) {
-		// Non-leaf collision means a sibling field already created this parent node — merge into it
+		// Non-leaf collision means a sibling field already created this parent node
+		// — merge into it
 		if (is_leaf) {
 			throw InternalException("Invalid stats name: duplicate leaf '%s'", name[offset]);
 		}
@@ -143,7 +144,7 @@ static void ParseStatsType(const vector<string> &name, idx_t offset, DeltaColumn
 	return ParseStatsType(name, offset + 1, stats, output[name[offset]].children);
 }
 
-static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, StatNode> &tree, const string &field) {
+static Value CreateValueLogicalTypeFromStatNode(const map<string, StatNode> &tree, const string &field) {
 	child_list_t<Value> children;
 
 	for (const auto &node : tree) {
@@ -175,7 +176,7 @@ static Value CreateValueLogicalTypeFromStatNode(const unordered_map<string, Stat
 struct WriteMetaData {
 	static LogicalType GetStatsType(optional_ptr<const DeltaDataFile> file) {
 		if (file && !file->column_stats.empty()) {
-			unordered_map<string, StatNode> result;
+			map<string, StatNode> result;
 			for (auto stat : file->column_stats) {
 				ParseStatsType(stat.first, 0, stat.second, result);
 			}
@@ -198,7 +199,7 @@ struct WriteMetaData {
 			return Value::STRUCT(GetStatsType(nullptr), {Value::BIGINT(file.row_count), Value(tight_bounds)});
 		}
 
-		unordered_map<string, StatNode> result;
+		map<string, StatNode> result;
 		for (auto stat : file.column_stats) {
 			ParseStatsType(stat.first, 0, stat.second, result);
 		}
@@ -229,7 +230,8 @@ struct WriteMetaData {
 		for (const auto &file : outstanding_appends) {
 			auto table_path = snapshot.GetPath();
 
-			// consume any leading '/' chars to be certain path is relative -- as seen in #268 they corrupt (for spark)
+			// consume any leading '/' chars to be certain path is relative -- as seen
+			// in #268 they corrupt (for spark)
 			// https://github.com/duckdb/duckdb-delta/issues/268
 			auto file_name_offset = table_path.size();
 			for (; file.file_name[file_name_offset] == '/'; ++file_name_offset) {
@@ -315,7 +317,9 @@ void DeltaTransaction::CleanUpFiles() {
 	if (context_ptr) {
 		for (const auto &append : outstanding_appends) {
 			auto &fs = FileSystem::GetFileSystem(*context_ptr);
-			fs.TryRemoveFile(append.file_name);
+			if (fs.FileExists(append.file_name)) {
+				fs.RemoveFile(append.file_name);
+			}
 		}
 	}
 	outstanding_appends.clear();
@@ -342,7 +346,8 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 			throw InternalException("CommitCallback received request without commit_info");
 		}
 
-		// TODO (sam): This function is a little hacky right now, could be cleaned up
+		// TODO (sam): This function is a little hacky right now, could be cleaned
+		// up
 
 		auto &commit_info = request.commit_info.some._0;
 		auto staged_commit_path_string = KernelUtils::FromDeltaString(commit_info.file_name);
@@ -375,8 +380,8 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 		if (!transaction->commit_function) {
 			throw InternalException("No commit function found in Catalog Commit Callback");
 		}
-		// Special function that expects a 2-sized ANY datachunk containing the input on row 1 that will place the
-		// output on row 2
+		// Special function that expects a 2-sized ANY datachunk containing the
+		// input on row 1 that will place the output on row 2
 		transaction->commit_function->functions.functions[0].function(*current_context, data, output);
 
 		auto result = output.GetValue(1, 0);
@@ -404,7 +409,8 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 		error_result.some._0 = error_str.ok._0;
 		return error_result;
 	} catch (...) {
-		string message = "Unknown error occurred when committing to a Unity Catalog managed commit";
+		string message = "Unknown error occurred when committing to a Unity "
+		                 "Catalog managed commit";
 		auto error_str =
 		    ffi::allocate_kernel_string(KernelUtils::ToDeltaString(message), DuckDBEngineError::AllocateError);
 		ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> error_result;
@@ -414,77 +420,88 @@ ffi::OptionalValue<ffi::Handle<ffi::ExclusiveRustString>> DeltaTransaction::Comm
 	}
 }
 
-void DeltaTransaction::Commit(ClientContext &context) {
-	if (transaction_state == DeltaTransactionState::TRANSACTION_STARTED) {
-		if (!outstanding_appends.empty() || has_schema_changes) {
-			// Finally we add the registered transaction versions
-			for (const auto &app_version : app_versions) {
-				auto app_id = app_version.first;
-				auto app_version_info = app_version.second;
-				auto new_version = app_version_info.new_version;
-				auto expected_version = app_version_info.expected_version;
-
-				// Verify that the previous version is correct still
-				auto &snapshot = *table_entry->snapshot;
-				auto kernel_snapshot = snapshot.snapshot->GetLockingRef();
-				auto app_id_kernel_string = KernelUtils::ToDeltaString(app_id);
-				auto get_app_id_version_result = ffi::get_app_id_version(kernel_snapshot.GetPtr(), app_id_kernel_string,
-				                                                         snapshot.extern_engine.get());
-
-				ffi::OptionalValue<int64_t> version_actual_opt;
-				auto unpacked_version_result =
-				    KernelUtils::TryUnpackResult(get_app_id_version_result, version_actual_opt);
-				bool has_error = false;
-				string error_version;
-				if (unpacked_version_result.HasError()) {
-					has_error = !expected_version.IsNull();
-					if (has_error) {
-						error_version = "ERROR";
-					}
-				}
-
-				if (!has_error) {
-					const auto actual_version = version_actual_opt.tag == ffi::OptionalValue<int64_t>::Tag::None
-					                                ? Value()
-					                                : Value(version_actual_opt.some._0);
-					has_error = ((actual_version.IsNull() != expected_version.IsNull()) ||
-					             (!actual_version.IsNull() && actual_version != expected_version));
-					if (has_error) {
-						error_version = actual_version.ToString();
-					}
-				}
-
-				if (has_error) {
-					throw TransactionException("DeltaTransaction version for app_id '%s' did not match the expected "
-					                           "previous version of '%s' (found: '%s')",
-					                           app_id, expected_version.ToString(), error_version);
-				}
-
-				kernel_transaction = table_entry->snapshot->TryUnpackKernelResult(
-				    ffi::with_transaction_id(kernel_transaction.release(), KernelUtils::ToDeltaString(app_id),
-				                             new_version, table_entry->snapshot->extern_engine.get()));
-			}
-
-			// We have some special error handling here to ensure the error created by DuckDB is properly thrown here,
-			// because we can't throw it across the FFI boundary, we need to store it in the transaction
-			ffi::Handle<ffi::ExclusiveCommittedTransaction> commit_result;
-
-			DUCKDB_LOG_INTERNAL(context, "delta.Commit", LogLevel::LOG_DEBUG, "Committing %s",
-			                    table_entry->snapshot->GetPath());
-			auto res = KernelUtils::TryUnpackResult(
-			    ffi::commit(kernel_transaction.release(), table_entry->snapshot->extern_engine.get()), commit_result);
-			if (res.HasError()) {
-				if (active_error.HasError()) {
-					active_error.Throw();
-				} else {
-					res.Throw();
-				}
-			} else {
-				ffi::free_committed_transaction(commit_result);
-			}
-		}
-		transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
+DeltaCommitOutcome DeltaTransaction::Commit(ClientContext &context) {
+	if (transaction_state != DeltaTransactionState::TRANSACTION_STARTED) {
+		return {DeltaCommitOutcomeType::NO_CHANGES, "", DConstants::INVALID_INDEX, ""};
 	}
+
+	if (HasOutstandingChanges()) {
+		if (!GetCommitToken().empty() &&
+		    ffi::has_set_transaction_retention_duration(table_entry->snapshot->snapshot->GetLockingRef().GetPtr())) {
+			throw InvalidConfigurationException("Delta idempotent writes require "
+			                                    "delta.setTransactionRetentionDuration to be unset");
+		}
+
+		// Finally we add the registered transaction versions
+		for (const auto &app_version : app_versions) {
+			auto app_id = app_version.first;
+			auto app_version_info = app_version.second;
+			auto new_version = app_version_info.new_version;
+			auto expected_version = app_version_info.expected_version;
+
+			// Verify that the previous version is correct still
+			auto &snapshot = *table_entry->snapshot;
+			auto kernel_snapshot = snapshot.snapshot->GetLockingRef();
+			auto app_id_kernel_string = KernelUtils::ToDeltaString(app_id);
+			auto get_app_id_version_result =
+			    ffi::get_app_id_version(kernel_snapshot.GetPtr(), app_id_kernel_string, snapshot.extern_engine.get());
+
+			ffi::OptionalValue<int64_t> version_actual_opt;
+			auto unpacked_version_result = KernelUtils::TryUnpackResult(get_app_id_version_result, version_actual_opt);
+			if (unpacked_version_result.HasError()) {
+				unpacked_version_result.Throw();
+			}
+
+			bool has_error = false;
+			string error_version;
+			const auto actual_version = version_actual_opt.tag == ffi::OptionalValue<int64_t>::Tag::None
+			                                ? Value()
+			                                : Value::BIGINT(version_actual_opt.some._0);
+			has_error = ((actual_version.IsNull() != expected_version.IsNull()) ||
+			             (!actual_version.IsNull() && actual_version != expected_version));
+			if (has_error) {
+				error_version = actual_version.ToString();
+			}
+
+			if (has_error) {
+				throw TransactionException("DeltaTransaction version for app_id '%s' "
+				                           "did not match the expected "
+				                           "previous version of '%s' (found: '%s')",
+				                           app_id, expected_version.ToString(), error_version);
+			}
+
+			kernel_transaction = table_entry->snapshot->TryUnpackKernelResult(
+			    ffi::with_transaction_id(kernel_transaction.release(), KernelUtils::ToDeltaString(app_id), new_version,
+			                             table_entry->snapshot->extern_engine.get()));
+		}
+
+		DUCKDB_LOG_INTERNAL(context, "delta.Commit", LogLevel::LOG_DEBUG, "Committing %s",
+		                    table_entry->snapshot->GetPath());
+		commit_boundary_entered = true;
+		auto commit_result =
+		    ffi::commit_with_outcome(kernel_transaction.release(), table_entry->snapshot->extern_engine.get());
+		transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
+
+		switch (commit_result.tag) {
+		case ffi::FfiTransactionCommitOutcome::Tag::FfiTransactionCommitOutcomeCommitted: {
+			auto version = ffi::committed_transaction_version(&commit_result.committed._0);
+			ffi::free_committed_transaction(commit_result.committed._0);
+			return {DeltaCommitOutcomeType::COMMITTED, "", version, ""};
+		}
+		case ffi::FfiTransactionCommitOutcome::Tag::FfiTransactionCommitOutcomeConflict:
+			return {DeltaCommitOutcomeType::CONFLICT, "", commit_result.conflict.version, "Delta log commit conflict"};
+		case ffi::FfiTransactionCommitOutcome::Tag::FfiTransactionCommitOutcomeNoEffect:
+			return {DeltaCommitOutcomeType::NO_EFFECT, "", DConstants::INVALID_INDEX,
+			        "Delta commit validation failed before storage commit"};
+		case ffi::FfiTransactionCommitOutcome::Tag::FfiTransactionCommitOutcomeIndeterminate:
+			return {DeltaCommitOutcomeType::INDETERMINATE, "", DConstants::INVALID_INDEX,
+			        active_error.HasError() ? active_error.Message() : "Delta storage commit result is indeterminate"};
+		}
+		throw InternalException("Unknown Delta commit outcome");
+	}
+
+	transaction_state = DeltaTransactionState::TRANSACTION_FINISHED;
+	return {DeltaCommitOutcomeType::NO_CHANGES, "", DConstants::INVALID_INDEX, ""};
 }
 
 void DeltaTransaction::Rollback() {
@@ -517,8 +534,11 @@ void DeltaTransaction::InitializeTransaction(ClientContext &context) {
 			// Create UC commit client with callbacks, passing `this` as the context
 			auto commit_client = ffi::get_uc_commit_client(this, CommitCallback);
 			auto table_id = KernelUtils::ToDeltaString(unity_table_id.empty() ? path : unity_table_id);
-			auto uc_committer = table_entry->snapshot->TryUnpackKernelResult(
-			    ffi::get_uc_committer(commit_client, table_id, DuckDBEngineError::AllocateError));
+			auto catalog_name = KernelUtils::ToDeltaString(parent_catalog_name);
+			auto schema_name = KernelUtils::ToDeltaString(table_entry->ParentSchema().name);
+			auto table_name = KernelUtils::ToDeltaString(table_entry->name);
+			auto uc_committer = table_entry->snapshot->TryUnpackKernelResult(ffi::get_uc_committer(
+			    commit_client, table_id, catalog_name, schema_name, table_name, DuckDBEngineError::AllocateError));
 			new_kernel_transaction = table_entry->snapshot->TryUnpackKernelResult(ffi::transaction_with_committer(
 			    snapshot_ref.GetPtr(), table_entry->snapshot->extern_engine.get(), uc_committer));
 		} else {
@@ -554,7 +574,8 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 	outstanding_appends.insert(outstanding_appends.end(), append_files.begin(), append_files.end());
 
 	// TODO: this requires a round trip! we might already be able to optimize this
-	// Note: file_size_bytes is already set from copy stats; we only need last_modified_time from the file system
+	// Note: file_size_bytes is already set from copy stats; we only need
+	// last_modified_time from the file system
 	for (idx_t i = start; i < outstanding_appends.size(); i++) {
 		auto &file = outstanding_appends[i];
 		auto &fs = FileSystem::GetFileSystem(context);
@@ -563,10 +584,11 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 	}
 
 	if (!append_files.empty()) {
-		// Build and add write metadata for new files per append; we do so here instead of in ::Commit
-		// within Commit we no longer have an active transaction, which is required to build the arrow schema. We could
-		// alternatively extend the Arrow API to support pre-build/cache the schema, but writing per append here is
-		// simple.
+		// Build and add write metadata for new files per append; we do so here
+		// instead of in ::Commit within Commit we no longer have an active
+		// transaction, which is required to build the arrow schema. We could
+		// alternatively extend the Arrow API to support pre-build/cache the schema,
+		// but writing per append here is simple.
 		vector<DeltaDataFile> new_files(outstanding_appends.begin() + NumericCast<ptrdiff_t>(start),
 		                                outstanding_appends.end());
 		WriteMetaData write_metadata(*table_entry->snapshot, new_files);
@@ -579,7 +601,8 @@ void DeltaTransaction::Append(ClientContext &context, const vector<DeltaDataFile
 	}
 }
 
-void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_columns) {
+void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_columns,
+                                  optional_ptr<const string> metadata_schema_json) {
 	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
 		InitializeTransaction(context);
 	}
@@ -587,10 +610,16 @@ void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_
 	DeltaSchemaBuilder schema_builder(new_columns);
 	auto engine_schema = schema_builder.CreateEngineSchema();
 	ffi::Handle<ffi::ExclusiveTransaction> evolved_transaction;
-	auto evolve_result = KernelUtils::TryUnpackResult(
-	    ffi::transaction_with_added_columns(kernel_transaction.release(), &engine_schema,
-	                                        table_entry->snapshot->extern_engine.get()),
-	    evolved_transaction);
+	auto evolve_result = metadata_schema_json
+	                         ? KernelUtils::TryUnpackResult(ffi::transaction_with_added_columns_and_metadata(
+	                                                            kernel_transaction.release(), &engine_schema,
+	                                                            KernelUtils::ToDeltaString(*metadata_schema_json),
+	                                                            table_entry->snapshot->extern_engine.get()),
+	                                                        evolved_transaction)
+	                         : KernelUtils::TryUnpackResult(
+	                               ffi::transaction_with_added_columns(kernel_transaction.release(), &engine_schema,
+	                                                                   table_entry->snapshot->extern_engine.get()),
+	                               evolved_transaction);
 	if (evolve_result.HasError()) {
 		if (schema_builder.GetError().HasError()) {
 			schema_builder.GetError().Throw();
@@ -612,8 +641,36 @@ void DeltaTransaction::AddColumns(ClientContext &context, const ColumnList &new_
 	write_entry = table_entry.get();
 }
 
-void DeltaTransaction::SetTransactionVersion(const string &app_id_p, idx_t new_version_p, Value expected_version_p) {
-	app_versions.insert({app_id_p, {new_version_p, std::move(expected_version_p)}});
+void DeltaTransaction::SetTransactionVersion(ClientContext &context, const string &app_id_p, int64_t new_version_p,
+                                             Value expected_version_p) {
+	static constexpr const char *TOKEN_PREFIX = "thunderduck.r4.token.";
+	if (transaction_state == DeltaTransactionState::TRANSACTION_NOT_YET_STARTED) {
+		InitializeTransaction(context);
+	}
+	if (StringUtil::StartsWith(app_id_p, TOKEN_PREFIX)) {
+		for (const auto &entry : app_versions) {
+			if (StringUtil::StartsWith(entry.first, TOKEN_PREFIX)) {
+				throw InvalidInputException("A Delta transaction can contain only one Thunderduck write token");
+			}
+		}
+	}
+	if (!app_versions.emplace(app_id_p, TransactionVersion {new_version_p, std::move(expected_version_p)}).second) {
+		throw InvalidInputException("Transaction version for app_id '%s' was set more than once", app_id_p);
+	}
+}
+
+string DeltaTransaction::GetCommitToken() const {
+	static constexpr const char *TOKEN_PREFIX = "thunderduck.r4.token.";
+	for (const auto &entry : app_versions) {
+		if (StringUtil::StartsWith(entry.first, TOKEN_PREFIX)) {
+			return entry.first;
+		}
+	}
+	return "";
+}
+
+bool DeltaTransaction::CommitBoundaryEntered() const {
+	return commit_boundary_entered;
 }
 
 DeltaTransaction &DeltaTransaction::Get(ClientContext &context, Catalog &catalog) {
@@ -626,7 +683,7 @@ AccessMode DeltaTransaction::GetAccessMode() const {
 
 bool DeltaTransaction::HasOutstandingChanges() const {
 	unique_lock<mutex> lck(lock);
-	return !outstanding_appends.empty() || has_schema_changes;
+	return !outstanding_appends.empty() || has_schema_changes || !app_versions.empty();
 }
 
 optional_ptr<DeltaTableEntry> DeltaTransaction::GetTableEntry(idx_t version) {

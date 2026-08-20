@@ -54,6 +54,10 @@ struct KernelUtils {
 	static vector<bool> FromDeltaBoolSlice(const struct ffi::KernelBoolSlice slice);
 	static string FetchFromStringMap(ffi::Handle<ffi::SharedExternEngine> engine, const ffi::CStringMap *map,
 	                                 const string &key);
+	static string FetchFromMetadataMap(ffi::Handle<ffi::SharedExternEngine> engine, const ffi::CMetadataMap *map,
+	                                   const string &key);
+	static ffi::ExternResult<uintptr_t> VisitExpressionColumn(ffi::KernelExpressionVisitorState *state,
+	                                                          const vector<string> &parts);
 
 	static void *StringAllocationNew(const struct ffi::KernelStringSlice slice) {
 		return new string(slice.ptr, slice.len);
@@ -145,7 +149,8 @@ private:
 	                               uintptr_t child_value_list_id);
 	static void VisitDecimalLiteral(void *state, uintptr_t sibling_list_id, int64_t value_ms, uint64_t value_ls,
 	                                uint8_t precision, uint8_t scale);
-	static void VisitColumnExpression(void *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name);
+	static void VisitColumnExpression(void *state, uintptr_t sibling_list_id, const ffi::KernelStringSlice *parts,
+	                                  uintptr_t parts_len);
 	static void VisitStructExpression(void *state, uintptr_t sibling_list_id, uintptr_t child_list_id);
 	static void VisitStructPatchExpression(void *data, uintptr_t sibling_list_id, uintptr_t input_path_list_id,
 	                                       uintptr_t prepended_field_list_id, uintptr_t field_patch_list_id,
@@ -303,19 +308,19 @@ private:
 	static ffi::EngineSchemaVisitor CreateSchemaVisitor(KernelSchemaVisitor &state);
 
 	typedef void(SimpleTypeVisitorFunction)(void *, uintptr_t, ffi::KernelStringSlice, bool is_nullable,
-	                                        const ffi::CStringMap *metadata);
+	                                        const ffi::CMetadataMap *metadata);
 
-	static void ApplyDeltaColumnMapping(ffi::Handle<ffi::SharedExternEngine> engine, const ffi::CStringMap *metadata,
+	static void ApplyDeltaColumnMapping(ffi::Handle<ffi::SharedExternEngine> engine, const ffi::CMetadataMap *metadata,
 	                                    DeltaMultiFileColumnDefinition &col_def) {
-		auto id = KernelUtils::FetchFromStringMap(engine, metadata, "parquet.field.id");
+		auto id = KernelUtils::FetchFromMetadataMap(engine, metadata, "parquet.field.id");
 		if (!id.empty()) {
 			col_def.identifier = Value(id).DefaultCastAs(LogicalType::BIGINT);
 		}
-		auto name = KernelUtils::FetchFromStringMap(engine, metadata, "delta.columnMapping.physicalName");
+		auto name = KernelUtils::FetchFromMetadataMap(engine, metadata, "delta.columnMapping.physicalName");
 		if (!name.empty()) {
 			col_def.identifier = Value(name);
 		}
-		col_def.char_varchar_type = KernelUtils::FetchFromStringMap(engine, metadata, "__CHAR_VARCHAR_TYPE_STRING");
+		col_def.char_varchar_type = KernelUtils::FetchFromMetadataMap(engine, metadata, "__CHAR_VARCHAR_TYPE_STRING");
 		col_def.default_expression = make_uniq<ConstantExpression>(Value(col_def.type));
 	}
 
@@ -325,7 +330,7 @@ private:
 	}
 	template <LogicalTypeId TypeId>
 	static void VisitSimpleTypeImpl(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                                bool is_nullable, const ffi::CStringMap *metadata) {
+	                                bool is_nullable, const ffi::CMetadataMap *metadata) {
 		DeltaMultiFileColumnDefinition col_def(KernelUtils::FromDeltaString(name), TypeId, is_nullable);
 		ApplyDeltaColumnMapping(state->engine, metadata, col_def);
 
@@ -333,16 +338,16 @@ private:
 	}
 
 	static void VisitDecimal(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                         bool is_nullable, const ffi::CStringMap *metadata, uint8_t precision, uint8_t scale);
+	                         bool is_nullable, const ffi::CMetadataMap *metadata, uint8_t precision, uint8_t scale);
 	static uintptr_t MakeFieldList(KernelSchemaVisitor *state, uintptr_t capacity_hint);
 	static void VisitStruct(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                        bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
+	                        bool is_nullable, const ffi::CMetadataMap *metadata, uintptr_t child_list_id);
 	static void VisitArray(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                       bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
+	                       bool is_nullable, const ffi::CMetadataMap *metadata, uintptr_t child_list_id);
 	static void VisitMap(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                     bool is_nullable, const ffi::CStringMap *metadata, uintptr_t child_list_id);
+	                     bool is_nullable, const ffi::CMetadataMap *metadata, uintptr_t child_list_id);
 	static void VisitVariant(KernelSchemaVisitor *state, uintptr_t sibling_list_id, ffi::KernelStringSlice name,
-	                         bool is_nullable, const ffi::CStringMap *metadata);
+	                         bool is_nullable, const ffi::CMetadataMap *metadata);
 
 	uintptr_t MakeFieldListImpl(uintptr_t capacity_hint);
 	void AppendToList(uintptr_t id, ffi::KernelStringSlice name, DeltaMultiFileColumnDefinition &&child);
@@ -482,17 +487,18 @@ private:
 
 	static uintptr_t VisitPredicate(PredicateVisitor *predicate, ffi::KernelExpressionVisitorState *state);
 
-	uintptr_t VisitConstantFilter(const string &col_name, const ConstantFilter &filter,
+	uintptr_t VisitConstantFilter(const vector<string> &col_path, const ConstantFilter &filter,
 	                              ffi::KernelExpressionVisitorState *state);
-	uintptr_t VisitAndFilter(const string &col_name, const ConjunctionAndFilter &filter,
+	uintptr_t VisitAndFilter(const vector<string> &col_path, const ConjunctionAndFilter &filter,
 	                         ffi::KernelExpressionVisitorState *state);
 
-	uintptr_t VisitIsNull(const string &col_name, ffi::KernelExpressionVisitorState *state);
-	uintptr_t VisitIsNotNull(const string &col_name, ffi::KernelExpressionVisitorState *state);
-	uintptr_t VisitStructExtractFilter(const string &col_name, const StructFilter &filter,
+	uintptr_t VisitIsNull(const vector<string> &col_path, ffi::KernelExpressionVisitorState *state);
+	uintptr_t VisitIsNotNull(const vector<string> &col_path, ffi::KernelExpressionVisitorState *state);
+	uintptr_t VisitStructExtractFilter(const vector<string> &col_path, const StructFilter &filter,
 	                                   ffi::KernelExpressionVisitorState *state);
 
-	uintptr_t VisitFilter(const string &col_name, const TableFilter &filter, ffi::KernelExpressionVisitorState *state);
+	uintptr_t VisitFilter(const vector<string> &col_path, const TableFilter &filter,
+	                      ffi::KernelExpressionVisitorState *state);
 };
 
 // Singleton class to forward logs to DuckDB

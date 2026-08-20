@@ -38,7 +38,7 @@ BEGIN TRANSACTION
 
 # Mark the current delta transaction as 'my_app_id' and 'current_batch' and the expected version is latest_version
 statement ok
-CALL delta_set_transaction_version('delta_table', 'my_app_id', 3::UBIGINT, 2::UBIGINT);
+CALL delta_set_transaction_version('delta_table', 'my_app_id', 3::BIGINT, 2::BIGINT);
 
 statement ok
 INSERT INTO delta_table values (1);
@@ -57,7 +57,7 @@ BEGIN TRANSACTION
 
 # Mark the current delta transaction as 'my_app_id' and 'current_batch' and the expected version is latest_version
 statement ok
-CALL delta_set_transaction_version('delta_table', 'my_app_id', 1::UBIGINT, NULL::UBIGINT);
+CALL delta_set_transaction_version('delta_table', 'my_app_id', 1::BIGINT, NULL::BIGINT);
 
 statement ok
 INSERT INTO delta_table values (1); 
@@ -81,7 +81,7 @@ BEGIN TRANSACTION
 
 # Mark the current delta transaction as 'my_app_id' and 'current_batch' and the expected version is latest_version
 statement ok
-CALL delta_set_transaction_version('delta_table', 'my_app_id', 1::UBIGINT, NULL::UBIGINT);
+CALL delta_set_transaction_version('delta_table', 'my_app_id', 1::BIGINT, NULL::BIGINT);
 
 statement ok
 INSERT INTO delta_table values (1);
@@ -104,7 +104,7 @@ BEGIN TRANSACTION
 
 # Mark the current delta transaction as 'my_app_id' and 'current_batch' and the expected version is latest_version
 statement ok
-CALL delta_set_transaction_version('delta_table', 'my_app_id', 3::UBIGINT, 2::UBIGINT);
+CALL delta_set_transaction_version('delta_table', 'my_app_id', 3::BIGINT, 2::BIGINT);
 
 statement ok
 INSERT INTO delta_table values (1);

@@ -27,6 +27,7 @@ set(EXTENSION_SOURCES
     src/functions/expression_functions.cpp
     src/functions/util_functions.cpp
     src/functions/delta_transaction_utils/idempotency_helpers.cpp
+    src/functions/delta_transaction_utils/schema_evolution.cpp
     src/path_utils.cpp
     src/storage/delta_insert.cpp
     src/storage/delta_catalog.cpp
@@ -68,7 +69,7 @@ set(KERNEL_NAME delta_kernel)
 set(DELTA_KERNEL_GIT_REPOSITORY
     "https://github.com/lastrk/delta-kernel-rs.git")
 set(DELTA_KERNEL_GIT_COMMIT
-    "a9759e044cabe06c7342a4d319ec20fd2a4ba1a3")
+    "12545984e146e80b3629a3f0d91fd19ea50014b2")
 set(DELTA_KERNEL_LOCAL_DIR
     ""
     CACHE PATH "Use a local delta-kernel-rs checkout instead of cloning")

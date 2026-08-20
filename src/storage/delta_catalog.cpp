@@ -1,11 +1,11 @@
 #include "storage/delta_catalog.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/parser/parsed_data/create_schema_info.hpp"
+#include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
+#include "duckdb/storage/database_size.hpp"
 #include "storage/delta_schema_entry.hpp"
 #include "storage/delta_transaction.hpp"
-#include "duckdb/storage/database_size.hpp"
-#include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/parser/parsed_data/create_schema_info.hpp"
-#include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
-#include "duckdb/main/attached_database.hpp"
 
 #include "functions/delta_scan/delta_multi_file_list.hpp"
 
@@ -46,7 +46,8 @@ void DeltaCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 
 ErrorData DeltaCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	auto &base = info.Base().Cast<CreateTableInfo>();
-	// Delta has partition columns and table properties, but nothing that SORTED BY maps onto.
+	// Delta has partition columns and table properties, but nothing that SORTED
+	// BY maps onto.
 	if (!base.sort_keys.empty()) {
 		return ErrorData(ExceptionType::CATALOG,
 		                 StringUtil::Format("SORTED BY is not supported for tables in a %s catalog", GetCatalogType()));
@@ -87,6 +88,21 @@ string DeltaCatalog::GetDBPath() {
 
 bool DeltaCatalog::UseCachedSnapshot() {
 	return use_cache;
+}
+
+void DeltaCatalog::StoreCommitOutcome(DeltaCommitOutcome outcome) {
+	lock_guard<mutex> guard(commit_outcome_lock);
+	commit_outcome = make_uniq<DeltaCommitOutcome>(std::move(outcome));
+}
+
+DeltaCommitOutcome DeltaCatalog::TakeCommitOutcome(const string &token_app_id) const {
+	lock_guard<mutex> guard(commit_outcome_lock);
+	if (!commit_outcome || commit_outcome->token_app_id != token_app_id) {
+		throw InternalException("No Delta commit outcome exists for token '%s'", token_app_id);
+	}
+	auto result = std::move(*commit_outcome);
+	commit_outcome.reset();
+	return result;
 }
 
 optional_idx DeltaCatalog::GetCatalogVersion(ClientContext &context) {
